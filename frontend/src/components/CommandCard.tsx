@@ -2,6 +2,27 @@ import { useState } from 'react'
 import { Play, AlertTriangle, ShieldAlert, Shield, Copy, Check, CheckCircle2, Loader2, XCircle } from 'lucide-react'
 import { useAI } from '../contexts/AIContext'
 
+/**
+ * Strip ANSI escape codes and other terminal control sequences from text.
+ */
+function stripAnsiCodes(text: string): string {
+  // Remove ANSI escape sequences (colors, cursor control, etc.)
+  return text
+    // Standard ANSI escape sequences
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
+    // OSC sequences (Operating System Command)
+    .replace(/\x1B\][^\x07]*\x07/g, '')
+    // Other escape sequences
+    .replace(/\x1B[()][AB012]/g, '')
+    .replace(/\x1B[@-_][0-?]*[ -/]*[@-~]/g, '')
+    // Control characters
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    // Clean up excessive whitespace
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim()
+}
+
 interface CommandCardProps {
   command: {
     command: string
@@ -167,7 +188,7 @@ export default function CommandCard({ command }: CommandCardProps) {
           </div>
           {execOutput && (
             <pre className="mt-1 text-xs text-terminal-fg/70 font-mono whitespace-pre-wrap max-h-20 overflow-auto">
-              {execOutput}
+              {stripAnsiCodes(execOutput)}
             </pre>
           )}
         </div>
@@ -181,7 +202,7 @@ export default function CommandCard({ command }: CommandCardProps) {
           </div>
           {execOutput && (
             <pre className="mt-1 text-xs text-terminal-fg/70 font-mono whitespace-pre-wrap max-h-20 overflow-auto">
-              {execOutput}
+              {stripAnsiCodes(execOutput)}
             </pre>
           )}
         </div>
