@@ -1,0 +1,44 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ai-terminal
+  
+  # AI Configuration
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:your-api-key}
+      base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+      chat:
+        options:
+          model: gpt-4o
+          temperature: 0.7
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: llama3
+
+# Terminal Configuration
+terminal:
+  buffer-size: 50
+  encoding:
+    windows: GBK
+    unix: UTF-8
+  dangerous-commands:
+    - "rm -rf /"
+    - "rm -rf /*"
+    - "mkfs"
+    - "dd if=/dev/zero"
+    - ":(){ :|:& };:"
+    - "> /dev/sda"
+    - "chmod -R 777 /"
+    - "format c:"
+    - "del /f /s /q c:\\*"
+
+# Logging
+logging:
+  level:
+    com.aiterminal: DEBUG
+    org.springframework.web.socket: DEBUG

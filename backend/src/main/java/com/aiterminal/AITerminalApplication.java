@@ -1,0 +1,12 @@
+package com.aiterminal;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class AITerminalApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(AITerminalApplication.class, args);
+    }
+}
