@@ -28,7 +28,8 @@ public class LocalSession extends AbstractTerminalSession {
         super(SessionType.LOCAL, bufferSize);
         this.systemInspector = systemInspector;
         this.charset = systemInspector.getDefaultEncoding();
-        this.currentDirectory = systemInspector.getCurrentWorkingDirectory();
+        // Start terminal in user's home directory, not the Java process's working directory
+        this.currentDirectory = systemInspector.getHomeDirectory();
     }
 
     @Override
