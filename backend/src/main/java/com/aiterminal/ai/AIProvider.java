@@ -5,7 +5,8 @@ package com.aiterminal.ai;
  */
 public enum AIProvider {
     OLLAMA("ollama"),
-    OPENAI("openai");
+    OPENAI("openai"),
+    CUSTOM("custom");
 
     private final String value;
 

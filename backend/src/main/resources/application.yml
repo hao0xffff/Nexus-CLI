@@ -18,7 +18,7 @@ spring:
       base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
       chat:
         options:
-          model: llama3
+          model: "deepseek-r1:1.5b"
 
 # Terminal Configuration
 terminal:

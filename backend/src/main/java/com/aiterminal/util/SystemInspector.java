@@ -181,7 +181,75 @@ public class SystemInspector {
         log.info("Encoding: {}", defaultEncoding);
         log.info("User: {} @ {}", username, homeDirectory);
         log.info("CWD: {}", currentWorkingDirectory);
+        if (isWindows()) {
+            log.info("Windows Build: {} (ConPTY: {})", getWindowsBuild(), isConPtySupported() ? "supported" : "not supported");
+        }
         log.info("==========================");
+    }
+    
+    /**
+     * Get Windows build number.
+     */
+    public String getWindowsBuild() {
+        if (!isWindows()) {
+            return "N/A";
+        }
+        try {
+            ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "ver");
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.contains("Version")) {
+                        // Extract build number from "Microsoft Windows [Version 10.0.19045.3803]"
+                        int start = line.indexOf("10.0.");
+                        if (start > 0) {
+                            int end = line.indexOf(']');
+                            if (end > start) {
+                                return line.substring(start + 5, end);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Failed to get Windows build", e);
+        }
+        return "unknown";
+    }
+    
+    /**
+     * Check if Windows ConPTY is supported (Windows 10 1809+, build 17763+).
+     */
+    public boolean isConPtySupported() {
+        if (!isWindows()) {
+            return false;
+        }
+        String build = getWindowsBuild();
+        if ("unknown".equals(build) || "N/A".equals(build)) {
+            // If we can't determine the build, assume ConPTY is supported on modern Windows
+            // since pty4j will gracefully handle it if not
+            String osVersion = System.getProperty("os.version", "");
+            try {
+                // Windows 10+ has version 10.0.x
+                if (osVersion.startsWith("10.")) {
+                    return true;
+                }
+            } catch (Exception ignored) {}
+            return true; // Default to trying ConPTY
+        }
+        try {
+            String[] parts = build.split("\\.");
+            if (parts.length > 0) {
+                int buildNumber = Integer.parseInt(parts[0]);
+                return buildNumber >= 17763;
+            }
+        } catch (Exception e) {
+            log.debug("Failed to parse Windows build: {}", build, e);
+            return true; // Default to trying ConPTY on parse failure
+        }
+        return true;
     }
 
     /**

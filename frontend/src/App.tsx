@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import Terminal from './components/Terminal'
 import AISidebar from './components/AISidebar'
 import TitleBar from './components/TitleBar'
@@ -10,7 +10,7 @@ import { PanelLeftClose, PanelLeft, Plus, Settings } from 'lucide-react'
 function AppContent() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [connectionDialogOpen, setConnectionDialogOpen] = useState(false)
-  const { createSession, sessions, activeSessionId } = useTerminal()
+  const { createSession, sessions, activeSessionId, setActiveSession, closeSession } = useTerminal()
 
   const handleNewLocalTerminal = useCallback(() => {
     createSession('local')
@@ -20,12 +20,14 @@ function AppContent() {
     setConnectionDialogOpen(true)
   }, [])
 
-  // Create initial terminal session
+  // Create initial terminal session only once
+  const initializedRef = useRef(false)
   useEffect(() => {
-    if (sessions.length === 0) {
-      handleNewLocalTerminal()
+    if (!initializedRef.current && sessions.length === 0) {
+      initializedRef.current = true
+      createSession('local')
     }
-  }, [sessions.length, handleNewLocalTerminal])
+  }, [sessions.length, createSession])
 
   return (
     <div className="flex flex-col h-screen bg-terminal-bg">
@@ -37,18 +39,35 @@ function AppContent() {
           {/* Terminal Tabs */}
           <div className="flex items-center bg-[#16161e] border-b border-[#1f2335] px-2">
             <div className="flex items-center gap-1 overflow-x-auto py-1 flex-1">
-              {sessions.map((session) => (
-                <button
+              {sessions.map((session, index) => (
+                <div
                   key={session.id}
-                  className={`px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap ${
+                  className={`group flex items-center gap-1 px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap cursor-pointer ${
                     session.id === activeSessionId
                       ? 'bg-terminal-bg text-terminal-fg'
                       : 'text-terminal-fg/60 hover:text-terminal-fg hover:bg-[#1a1b26]/50'
                   }`}
-                  onClick={() => useTerminal().setActiveSession(session.id)}
+                  onClick={() => setActiveSession(session.id)}
                 >
-                  {session.type === 'ssh' ? `SSH: ${session.name}` : `Terminal ${sessions.indexOf(session) + 1}`}
-                </button>
+                  <span className={`w-2 h-2 rounded-full mr-1 ${
+                    session.status === 'connected' ? 'bg-terminal-green' :
+                    session.status === 'connecting' ? 'bg-terminal-yellow animate-pulse' :
+                    session.status === 'error' ? 'bg-terminal-red' : 'bg-terminal-fg/30'
+                  }`} />
+                  <span>{session.type === 'ssh' ? `SSH: ${session.name}` : `Terminal ${index + 1}`}</span>
+                  {sessions.length > 1 && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        closeSession(session.id)
+                      }}
+                      className="ml-1 opacity-0 group-hover:opacity-100 hover:text-terminal-red transition-opacity"
+                      title="Close terminal"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
             

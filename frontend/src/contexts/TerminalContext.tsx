@@ -28,6 +28,7 @@ interface TerminalContextType {
   sendInput: (sessionId: string, data: string) => void
   sendResize: (sessionId: string, cols: number, rows: number) => void
   getRecentOutput: (sessionId: string, lines?: number) => string
+  registerTerminal: (sessionId: string, writeCallback: (data: Uint8Array) => void) => void
 }
 
 const TerminalContext = createContext<TerminalContextType | null>(null)
@@ -49,6 +50,7 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const websocketsRef = useRef<Map<string, WebSocket>>(new Map())
   const outputBuffersRef = useRef<Map<string, string[]>>(new Map())
+  const terminalWritersRef = useRef<Map<string, (data: Uint8Array) => void>>(new Map())
 
   // Get WebSocket URL from Electron
   const getWsUrl = useCallback(async () => {
@@ -103,13 +105,11 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
         while (lines.length > 100) lines.shift()
         outputBuffersRef.current.set(sessionId, lines)
 
-        // Notify terminal component
-        setSessions(prev => prev.map(s => {
-          if (s.id === sessionId && s.onOutput) {
-            s.onOutput(data)
-          }
-          return s
-        }))
+        // Write to terminal component via registered callback
+        const writer = terminalWritersRef.current.get(sessionId)
+        if (writer) {
+          writer(data)
+        }
       } else {
         // Text message - control message
         try {
@@ -206,6 +206,10 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
     return buffer.slice(-lines).join('\n')
   }, [])
 
+  const registerTerminal = useCallback((sessionId: string, writeCallback: (data: Uint8Array) => void) => {
+    terminalWritersRef.current.set(sessionId, writeCallback)
+  }, [])
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -224,6 +228,7 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
     sendInput,
     sendResize,
     getRecentOutput,
+    registerTerminal,
   }
 
   return (

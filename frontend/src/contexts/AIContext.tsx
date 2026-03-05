@@ -17,14 +17,24 @@ interface CommandCard {
   riskLevel: 'SAFE' | 'WARNING' | 'DANGEROUS'
 }
 
+interface CommandExecution {
+  id: string
+  command: string
+  status: 'pending' | 'running' | 'success' | 'error'
+  timestamp: number
+  output?: string
+}
+
 interface AIContextType {
   messages: ChatMessage[]
   isLoading: boolean
-  provider: 'ollama' | 'openai'
-  setProvider: (provider: 'ollama' | 'openai') => void
+  provider: 'ollama' | 'openai' | 'custom'
+  setProvider: (provider: 'ollama' | 'openai' | 'custom') => void
   sendMessage: (message: string) => Promise<void>
-  executeCommand: (command: string) => void
+  executeCommand: (command: string) => Promise<CommandExecution>
   clearHistory: () => void
+  refreshProvider: () => Promise<void>
+  commandExecutions: CommandExecution[]
 }
 
 const AIContext = createContext<AIContextType | null>(null)
@@ -44,7 +54,8 @@ interface AIProviderProps {
 export function AIProvider({ children }: AIProviderProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isLoading, setIsLoading] = useState(false)
-  const [provider, setProvider] = useState<'ollama' | 'openai'>('ollama')
+  const [provider, setProvider] = useState<'ollama' | 'openai' | 'custom'>('ollama')
+  const [commandExecutions, setCommandExecutions] = useState<CommandExecution[]>([])
   const { activeSessionId, sendInput, getRecentOutput } = useTerminal()
 
   const getBackendUrl = useCallback(async () => {
@@ -53,6 +64,22 @@ export function AIProvider({ children }: AIProviderProps) {
     }
     return 'http://localhost:8080'
   }, [])
+
+  // Load current provider from backend config
+  const refreshProvider = useCallback(async () => {
+    try {
+      const backendUrl = await getBackendUrl()
+      const response = await fetch(`${backendUrl}/api/llm/config`)
+      if (response.ok) {
+        const data = await response.json()
+        if (data.activeProvider) {
+          setProvider(data.activeProvider as 'ollama' | 'openai' | 'custom')
+        }
+      }
+    } catch (error) {
+      console.error('Failed to refresh provider:', error)
+    }
+  }, [getBackendUrl])
 
   const sendMessage = useCallback(async (message: string) => {
     if (!message.trim()) return
@@ -123,11 +150,55 @@ export function AIProvider({ children }: AIProviderProps) {
     }
   }, [messages, provider, activeSessionId, getRecentOutput, getBackendUrl])
 
-  const executeCommand = useCallback((command: string) => {
-    if (activeSessionId) {
-      sendInput(activeSessionId, command + '\n')
+  const executeCommand = useCallback(async (command: string): Promise<CommandExecution> => {
+    const execution: CommandExecution = {
+      id: crypto.randomUUID(),
+      command,
+      status: 'pending',
+      timestamp: Date.now(),
     }
-  }, [activeSessionId, sendInput])
+    
+    setCommandExecutions(prev => [...prev.slice(-10), execution]) // Keep last 10
+    
+    if (!activeSessionId) {
+      execution.status = 'error'
+      execution.output = 'No active terminal session'
+      setCommandExecutions(prev => prev.map(e => e.id === execution.id ? execution : e))
+      return execution
+    }
+    
+    try {
+      // Get output before execution
+      const outputBefore = getRecentOutput(activeSessionId, 20)
+      
+      // Send command with newline to execute
+      execution.status = 'running'
+      setCommandExecutions(prev => prev.map(e => e.id === execution.id ? execution : e))
+      
+      // Use \r (carriage return) for terminal - this is what terminals expect
+      sendInput(activeSessionId, command + '\r')
+      
+      // Wait a bit for command to execute and capture output
+      await new Promise(resolve => setTimeout(resolve, 500))
+      
+      // Get output after execution
+      const outputAfter = getRecentOutput(activeSessionId, 20)
+      
+      // Extract new output (simple diff)
+      const newOutput = outputAfter.replace(outputBefore, '').trim()
+      
+      execution.status = 'success'
+      execution.output = newOutput || 'Command sent successfully'
+      setCommandExecutions(prev => prev.map(e => e.id === execution.id ? execution : e))
+      
+    } catch (error) {
+      execution.status = 'error'
+      execution.output = error instanceof Error ? error.message : 'Unknown error'
+      setCommandExecutions(prev => prev.map(e => e.id === execution.id ? execution : e))
+    }
+    
+    return execution
+  }, [activeSessionId, sendInput, getRecentOutput])
 
   const clearHistory = useCallback(() => {
     setMessages([])
@@ -141,6 +212,8 @@ export function AIProvider({ children }: AIProviderProps) {
     sendMessage,
     executeCommand,
     clearHistory,
+    refreshProvider,
+    commandExecutions,
   }
 
   return (

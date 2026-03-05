@@ -31,6 +31,9 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
     // Map WebSocket sessions to terminal sessions
     private final Map<String, ITerminalSession> wsToTerminal = new ConcurrentHashMap<>();
     private final Map<String, WebSocketSession> terminalToWs = new ConcurrentHashMap<>();
+    
+    // Lock objects for synchronized WebSocket sends
+    private final Map<String, Object> wsLocks = new ConcurrentHashMap<>();
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
@@ -132,28 +135,43 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
     private void linkSessions(WebSocketSession wsSession, ITerminalSession terminal) {
         wsToTerminal.put(wsSession.getId(), terminal);
         terminalToWs.put(terminal.getSessionId(), wsSession);
+        
+        // Create lock for this WebSocket session
+        Object lock = new Object();
+        wsLocks.put(wsSession.getId(), lock);
 
-        // Forward terminal output to WebSocket
+        // Forward terminal output to WebSocket (synchronized to prevent concurrent writes)
         terminal.onOutput(data -> {
-            try {
-                if (wsSession.isOpen()) {
-                    wsSession.sendMessage(new BinaryMessage(ByteBuffer.wrap(data)));
+            Object wsLock = wsLocks.get(wsSession.getId());
+            if (wsLock != null) {
+                synchronized (wsLock) {
+                    try {
+                        if (wsSession.isOpen()) {
+                            wsSession.sendMessage(new BinaryMessage(ByteBuffer.wrap(data)));
+                        }
+                    } catch (IOException e) {
+                        log.error("Error sending terminal output to WebSocket", e);
+                    }
                 }
-            } catch (IOException e) {
-                log.error("Error sending terminal output to WebSocket", e);
             }
         });
 
         // Handle terminal close
         terminal.onClose(() -> {
-            try {
-                if (wsSession.isOpen()) {
-                    sendMessage(wsSession, Map.of("type", "closed"));
+            Object wsLock = wsLocks.get(wsSession.getId());
+            if (wsLock != null) {
+                synchronized (wsLock) {
+                    try {
+                        if (wsSession.isOpen()) {
+                            sendMessageInternal(wsSession, Map.of("type", "closed"));
+                        }
+                    } catch (IOException e) {
+                        log.debug("Error sending close notification", e);
+                    }
                 }
-            } catch (IOException e) {
-                log.debug("Error sending close notification", e);
             }
             terminalToWs.remove(terminal.getSessionId());
+            wsLocks.remove(wsSession.getId());
         });
     }
 
@@ -200,6 +218,17 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
     }
 
     private void sendMessage(WebSocketSession session, Map<String, Object> data) throws IOException {
+        Object lock = wsLocks.get(session.getId());
+        if (lock != null) {
+            synchronized (lock) {
+                sendMessageInternal(session, data);
+            }
+        } else {
+            sendMessageInternal(session, data);
+        }
+    }
+    
+    private void sendMessageInternal(WebSocketSession session, Map<String, Object> data) throws IOException {
         if (session.isOpen()) {
             String json = objectMapper.writeValueAsString(data);
             session.sendMessage(new TextMessage(json));

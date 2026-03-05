@@ -25,10 +25,13 @@ public class TerminalSessionManager {
 
     /**
      * Create and register a new local session.
+     * Uses PTY if available (ConPTY on Windows, native PTY on Unix).
      */
     public ITerminalSession createLocalSession() {
-        LocalSession session = sessionFactory.createLocalSession();
+        ITerminalSession session = sessionFactory.createLocalSession();
         registerSession(session);
+        log.info("Created local session {} using {} mode", 
+                session.getSessionId(), sessionFactory.getTerminalMode());
         return session;
     }
 

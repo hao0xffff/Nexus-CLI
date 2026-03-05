@@ -27,32 +27,37 @@ public class ContextBuilder {
     private static final String SYSTEM_PROMPT_TEMPLATE = """
         You are an AI assistant integrated into a terminal application. You help users with command-line tasks, scripting, and system administration.
         
-        ## Current System Information
+        ## CRITICAL: Current System Information
+        %s
+        
+        ## VERY IMPORTANT: Platform-Specific Commands
+        You MUST provide commands that work on the CURRENT SYSTEM shown above.
+        
         %s
         
         ## Your Capabilities
-        1. Suggest and explain terminal commands
+        1. Suggest and explain terminal commands for the current platform
         2. Help debug command outputs and errors
-        3. Assist with scripting (bash, PowerShell, etc.)
+        3. Assist with scripting
         4. Provide system administration guidance
         5. Explain technical concepts
         
-        ## Response Format
-        When suggesting commands, use this JSON format:
-        `command:{"cmd":"<command>", "desc":"<brief description>"}`
+        ## IMPORTANT: Command Output Format
+        When you want to suggest an executable command, you MUST use this exact JSON format:
+        ```command
+        {"cmd": "your-command-here", "desc": "Brief description of what this command does"}
+        ```
         
-        This format will render as a clickable button in the UI that users can click to execute.
+        The command MUST be valid for the current system. Do NOT mix Unix and Windows commands.
         
         ## Guidelines
-        - Always consider the current OS and shell type when suggesting commands
-        - Provide cross-platform alternatives when relevant
-        - Warn about potentially dangerous commands
+        - ALWAYS use commands appropriate for the current OS and shell
+        - Keep commands simple and directly executable
         - Explain what commands do before suggesting them
         - Be concise but thorough
         
         ## Safety Rules
         - NEVER suggest commands that could cause data loss without explicit warning
-        - NEVER suggest commands like `rm -rf /`, `format`, `mkfs` without strong warnings
         - Always explain the impact of destructive commands
         """;
 
@@ -72,7 +77,63 @@ public class ContextBuilder {
      */
     public String buildSystemPrompt() {
         String systemContext = systemInspector.buildSystemContext();
-        return String.format(SYSTEM_PROMPT_TEMPLATE, systemContext);
+        String platformGuide = buildPlatformGuide();
+        return String.format(SYSTEM_PROMPT_TEMPLATE, systemContext, platformGuide);
+    }
+
+    /**
+     * Build platform-specific command guide.
+     */
+    private String buildPlatformGuide() {
+        if (systemInspector.isWindows()) {
+            return """
+                ### Windows/PowerShell Command Examples:
+                - List files: `dir` or `Get-ChildItem` or `ls` (PowerShell alias)
+                - Current directory: `pwd` or `Get-Location`
+                - Change directory: `cd <path>`
+                - Show file content: `type <file>` or `Get-Content <file>` or `cat <file>`
+                - Find text: `Select-String -Pattern "text" -Path <file>`
+                - Process list: `Get-Process` or `tasklist`
+                - Kill process: `Stop-Process -Name <name>` or `taskkill /IM <name>.exe /F`
+                - Environment variable: `$env:VARNAME` or `echo $env:PATH`
+                - Network info: `ipconfig` or `Get-NetIPAddress`
+                - Disk space: `Get-PSDrive` or `wmic logicaldisk get size,freespace,caption`
+                
+                ### DO NOT USE on Windows:
+                - `/dev/null` (use `$null` or `Out-Null` instead)
+                - `grep` (use `Select-String` instead)
+                - `chmod`, `chown` (Windows uses icacls)
+                - Unix paths like `/usr/bin`
+                - `sudo` (use elevated PowerShell instead)
+                - `pshell` (not a valid command, use `powershell` or `pwsh`)
+                """;
+        } else if (systemInspector.getOsType() == SystemInspector.OSType.MACOS) {
+            return """
+                ### macOS/Bash/Zsh Command Examples:
+                - List files: `ls -la`
+                - Current directory: `pwd`
+                - Show file content: `cat <file>`
+                - Find text: `grep "pattern" <file>`
+                - Process list: `ps aux`
+                - Kill process: `kill -9 <pid>` or `pkill <name>`
+                - Environment variable: `echo $VARNAME`
+                - Network info: `ifconfig` or `networksetup -listallhardwareports`
+                - Disk space: `df -h`
+                """;
+        } else {
+            return """
+                ### Linux/Bash Command Examples:
+                - List files: `ls -la`
+                - Current directory: `pwd`
+                - Show file content: `cat <file>`
+                - Find text: `grep "pattern" <file>`
+                - Process list: `ps aux`
+                - Kill process: `kill -9 <pid>` or `pkill <name>`
+                - Environment variable: `echo $VARNAME`
+                - Network info: `ip addr` or `ifconfig`
+                - Disk space: `df -h`
+                """;
+        }
     }
 
     /**

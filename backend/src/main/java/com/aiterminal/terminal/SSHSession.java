@@ -9,6 +9,7 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Properties;
 import java.util.concurrent.*;
+import java.util.function.Consumer;
 
 /**
  * SSH terminal session using JSch library.

@@ -7,6 +7,7 @@ import java.io.*;
 import java.nio.charset.Charset;
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.function.Consumer;
 
 /**
  * Local terminal session using ProcessBuilder.
@@ -139,8 +140,12 @@ public class LocalSession extends AbstractTerminalSession {
             throw new IOException("Session is not active");
         }
         
-        // Convert UTF-8 input to system encoding for Windows
+        // Handle special characters for Windows
         if (systemInspector.isWindows()) {
+            // Convert DEL (0x7F) to Backspace (0x08) for Windows terminals
+            // xterm.js sends 0x7F for backspace, but Windows expects 0x08
+            data = convertSpecialChars(data);
+            
             try {
                 String text = new String(data, Charset.forName("UTF-8"));
                 data = text.getBytes(Charset.forName(charset));
@@ -151,6 +156,23 @@ public class LocalSession extends AbstractTerminalSession {
         
         processInput.write(data);
         processInput.flush();
+    }
+
+    /**
+     * Convert special characters for Windows terminal compatibility.
+     * - DEL (0x7F) -> Backspace (0x08)
+     */
+    private byte[] convertSpecialChars(byte[] data) {
+        byte[] result = new byte[data.length];
+        for (int i = 0; i < data.length; i++) {
+            if (data[i] == 0x7F) {
+                // Convert DEL to Backspace
+                result[i] = 0x08;
+            } else {
+                result[i] = data[i];
+            }
+        }
+        return result;
     }
 
     @Override

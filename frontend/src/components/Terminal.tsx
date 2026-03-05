@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { Terminal as XTerm } from 'xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -11,17 +11,27 @@ interface TerminalProps {
   sessionId: string
 }
 
+interface ContextMenuState {
+  visible: boolean
+  x: number
+  y: number
+}
+
 export default function Terminal({ sessionId }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
-  const { getSession, sendInput, sendResize } = useTerminal()
+  const searchAddonRef = useRef<SearchAddon | null>(null)
+  const initializedRef = useRef(false)
+  const { getSession, sendInput, sendResize, registerTerminal } = useTerminal()
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>({ visible: false, x: 0, y: 0 })
 
   const session = getSession(sessionId)
 
   // Initialize terminal
   useEffect(() => {
-    if (!containerRef.current || terminalRef.current) return
+    if (!containerRef.current || initializedRef.current) return
+    initializedRef.current = true
 
     const terminal = new XTerm({
       cursorBlink: true,
@@ -52,6 +62,7 @@ export default function Terminal({ sessionId }: TerminalProps) {
         brightWhite: '#c0caf5',
       },
       allowProposedApi: true,
+      windowsMode: navigator.platform.toLowerCase().includes('win'),
     })
 
     // Load addons
@@ -67,12 +78,23 @@ export default function Terminal({ sessionId }: TerminalProps) {
     terminal.unicode.activeVersion = '11'
 
     terminal.open(containerRef.current)
-    fitAddon.fit()
+    
+    // Delay fit to ensure container has proper size
+    setTimeout(() => {
+      fitAddon.fit()
+      terminal.focus()
+    }, 100)
 
     terminalRef.current = terminal
     fitAddonRef.current = fitAddon
+    searchAddonRef.current = searchAddon
 
-    // Handle user input
+    // Register terminal write function with context
+    registerTerminal(sessionId, (data: Uint8Array) => {
+      terminal.write(data)
+    })
+
+    // Handle user input - send to backend
     terminal.onData((data) => {
       sendInput(sessionId, data)
     })
@@ -82,23 +104,51 @@ export default function Terminal({ sessionId }: TerminalProps) {
       sendInput(sessionId, data)
     })
 
+    // Handle keyboard shortcuts
+    terminal.attachCustomKeyEventHandler((event) => {
+      // Ctrl+Shift+C: Copy
+      if (event.ctrlKey && event.shiftKey && event.key === 'C') {
+        const selection = terminal.getSelection()
+        if (selection) {
+          navigator.clipboard.writeText(selection)
+        }
+        return false
+      }
+      
+      // Ctrl+Shift+V: Paste
+      if (event.ctrlKey && event.shiftKey && event.key === 'V') {
+        navigator.clipboard.readText().then(text => {
+          sendInput(sessionId, text)
+        }).catch(err => {
+          console.error('Failed to read clipboard:', err)
+        })
+        return false
+      }
+      
+      // Ctrl+L: Clear screen
+      if (event.ctrlKey && event.key === 'l') {
+        terminal.clear()
+        return true // Let it pass through to shell too
+      }
+      
+      // Ctrl+Shift+F: Search
+      if (event.ctrlKey && event.shiftKey && event.key === 'F') {
+        // Could trigger a search UI here
+        return false
+      }
+      
+      return true
+    })
+
     // Cleanup
     return () => {
       terminal.dispose()
       terminalRef.current = null
       fitAddonRef.current = null
+      searchAddonRef.current = null
+      initializedRef.current = false
     }
-  }, [sessionId, sendInput])
-
-  // Handle terminal output from session
-  useEffect(() => {
-    if (!session || !terminalRef.current) return
-
-    // Write any buffered output
-    if (session.outputBuffer.length > 0) {
-      terminalRef.current.write(new Uint8Array(session.outputBuffer))
-    }
-  }, [session?.outputBuffer])
+  }, [sessionId, sendInput, registerTerminal])
 
   // Handle resize
   const handleResize = useCallback(() => {
@@ -128,27 +178,114 @@ export default function Terminal({ sessionId }: TerminalProps) {
     }
   }, [handleResize])
 
-  // Expose terminal write function to context
+  // Focus terminal when clicked
+  const handleClick = useCallback(() => {
+    terminalRef.current?.focus()
+    setContextMenu({ visible: false, x: 0, y: 0 })
+  }, [])
+
+  // Handle right-click context menu
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setContextMenu({
+      visible: true,
+      x: e.clientX,
+      y: e.clientY,
+    })
+  }, [])
+
+  // Context menu actions
+  const handleCopy = useCallback(() => {
+    const selection = terminalRef.current?.getSelection()
+    if (selection) {
+      navigator.clipboard.writeText(selection)
+    }
+    setContextMenu({ visible: false, x: 0, y: 0 })
+  }, [])
+
+  const handlePaste = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      sendInput(sessionId, text)
+    } catch (err) {
+      console.error('Failed to read clipboard:', err)
+    }
+    setContextMenu({ visible: false, x: 0, y: 0 })
+    terminalRef.current?.focus()
+  }, [sessionId, sendInput])
+
+  const handleClear = useCallback(() => {
+    terminalRef.current?.clear()
+    setContextMenu({ visible: false, x: 0, y: 0 })
+    terminalRef.current?.focus()
+  }, [])
+
+  const handleSelectAll = useCallback(() => {
+    terminalRef.current?.selectAll()
+    setContextMenu({ visible: false, x: 0, y: 0 })
+  }, [])
+
+  // Close context menu when clicking outside
   useEffect(() => {
-    if (!terminalRef.current || !session) return
-
-    // Register output handler
-    const handleOutput = (data: Uint8Array) => {
-      terminalRef.current?.write(data)
+    const handleClickOutside = () => {
+      setContextMenu({ visible: false, x: 0, y: 0 })
     }
-
-    session.onOutput = handleOutput
-
-    return () => {
-      session.onOutput = undefined
+    if (contextMenu.visible) {
+      document.addEventListener('click', handleClickOutside)
+      return () => document.removeEventListener('click', handleClickOutside)
     }
-  }, [session])
+  }, [contextMenu.visible])
 
   return (
-    <div
-      ref={containerRef}
-      className="w-full h-full bg-terminal-bg"
-      style={{ padding: '8px' }}
-    />
+    <div className="relative w-full h-full">
+      <div
+        ref={containerRef}
+        className="w-full h-full bg-terminal-bg cursor-text"
+        style={{ padding: '8px' }}
+        onClick={handleClick}
+        onContextMenu={handleContextMenu}
+      />
+      
+      {/* Context Menu */}
+      {contextMenu.visible && (
+        <div
+          className="fixed z-50 bg-[#24283b] border border-[#414868] rounded-lg shadow-xl py-1 min-w-[160px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            onClick={handleCopy}
+            className="w-full px-4 py-2 text-left text-sm text-terminal-fg hover:bg-[#414868] flex items-center gap-3"
+          >
+            <span className="w-4">📋</span>
+            <span>Copy</span>
+            <span className="ml-auto text-xs text-terminal-fg/50">Ctrl+Shift+C</span>
+          </button>
+          <button
+            onClick={handlePaste}
+            className="w-full px-4 py-2 text-left text-sm text-terminal-fg hover:bg-[#414868] flex items-center gap-3"
+          >
+            <span className="w-4">📥</span>
+            <span>Paste</span>
+            <span className="ml-auto text-xs text-terminal-fg/50">Ctrl+Shift+V</span>
+          </button>
+          <div className="border-t border-[#414868] my-1" />
+          <button
+            onClick={handleSelectAll}
+            className="w-full px-4 py-2 text-left text-sm text-terminal-fg hover:bg-[#414868] flex items-center gap-3"
+          >
+            <span className="w-4">📝</span>
+            <span>Select All</span>
+          </button>
+          <button
+            onClick={handleClear}
+            className="w-full px-4 py-2 text-left text-sm text-terminal-fg hover:bg-[#414868] flex items-center gap-3"
+          >
+            <span className="w-4">🧹</span>
+            <span>Clear</span>
+            <span className="ml-auto text-xs text-terminal-fg/50">Ctrl+L</span>
+          </button>
+        </div>
+      )}
+    </div>
   )
 }

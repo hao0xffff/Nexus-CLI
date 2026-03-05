@@ -1,13 +1,24 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Trash2, Bot, User, AlertTriangle, Play, Loader2 } from 'lucide-react'
+import { Send, Trash2, Bot, User, AlertTriangle, Play, Loader2, Zap, HelpCircle, Terminal, FileCode, Bug, Settings2, Settings } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAI } from '../contexts/AIContext'
 import CommandCardComponent from './CommandCard'
+import LLMSettings from './LLMSettings'
+
+// Quick action buttons for common queries
+const QUICK_ACTIONS = [
+  { icon: Terminal, label: 'List files', prompt: 'How do I list all files in the current directory?' },
+  { icon: FileCode, label: 'Git status', prompt: 'Show me the git status command' },
+  { icon: Bug, label: 'Find process', prompt: 'How do I find and kill a process by name?' },
+  { icon: Settings2, label: 'System info', prompt: 'How to check system information on this OS?' },
+]
 
 export default function AISidebar() {
-  const { messages, isLoading, provider, setProvider, sendMessage, clearHistory } = useAI()
+  const { messages, isLoading, provider, setProvider, sendMessage, clearHistory, refreshProvider } = useAI()
   const [input, setInput] = useState('')
+  const [showQuickActions, setShowQuickActions] = useState(true)
+  const [showSettings, setShowSettings] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -41,10 +52,22 @@ export default function AISidebar() {
 
   // Remove command patterns from display text
   const cleanMessageContent = (content: string) => {
-    return content.replace(/`command:\{[^}]+\}`/g, '').trim()
+    // Remove ```command blocks
+    let cleaned = content.replace(/```command\s*\n?\s*\{[^}]+\}\s*\n?```/g, '')
+    // Remove inline `command:{}` patterns
+    cleaned = cleaned.replace(/`command:\{[^}]+\}`/g, '')
+    // Remove consecutive empty lines
+    cleaned = cleaned.replace(/\n{3,}/g, '\n\n')
+    return cleaned.trim()
   }
 
   return (
+    <>
+    <LLMSettings 
+      isOpen={showSettings} 
+      onClose={() => setShowSettings(false)} 
+      onConfigChange={() => refreshProvider?.()}
+    />
     <div className="flex flex-col h-full bg-[#1f2335]">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#292e42]">
@@ -53,15 +76,18 @@ export default function AISidebar() {
           <span className="font-medium text-sm">AI Assistant</span>
         </div>
         <div className="flex items-center gap-2">
-          {/* Provider selector */}
-          <select
-            value={provider}
-            onChange={(e) => setProvider(e.target.value as 'ollama' | 'openai')}
-            className="bg-[#24283b] text-xs px-2 py-1 rounded border border-[#292e42] focus:outline-none focus:border-terminal-blue"
+          {/* Provider indicator */}
+          <span className="text-xs text-terminal-fg/60 px-2 py-1 bg-[#24283b] rounded">
+            {provider === 'ollama' ? '🟢 Ollama' : provider === 'openai' ? '🟡 OpenAI' : '🟣 Custom'}
+          </span>
+          {/* Settings */}
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-1.5 text-terminal-fg/60 hover:text-terminal-blue rounded transition-colors"
+            title="LLM Settings"
           >
-            <option value="ollama">Ollama</option>
-            <option value="openai">OpenAI</option>
-          </select>
+            <Settings size={14} />
+          </button>
           {/* Clear history */}
           <button
             onClick={clearHistory}
@@ -76,10 +102,31 @@ export default function AISidebar() {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 ? (
-          <div className="text-center text-terminal-fg/40 py-8">
-            <Bot size={48} className="mx-auto mb-4 opacity-50" />
-            <p className="text-sm">Ask me anything about terminal commands,</p>
-            <p className="text-sm">scripting, or system administration.</p>
+          <div className="text-center py-6">
+            <Bot size={48} className="mx-auto mb-4 text-terminal-blue/50" />
+            <p className="text-sm text-terminal-fg/60 mb-1">Ask me anything about terminal commands,</p>
+            <p className="text-sm text-terminal-fg/60 mb-4">scripting, or system administration.</p>
+            
+            {/* Quick Actions */}
+            <div className="mt-4 space-y-2">
+              <p className="text-xs text-terminal-fg/40 mb-2">Quick actions:</p>
+              <div className="grid grid-cols-2 gap-2">
+                {QUICK_ACTIONS.map((action, index) => (
+                  <button
+                    key={index}
+                    onClick={() => {
+                      sendMessage(action.prompt)
+                      setShowQuickActions(false)
+                    }}
+                    disabled={isLoading}
+                    className="flex items-center gap-2 px-3 py-2 bg-[#24283b] hover:bg-[#292e42] rounded-lg text-xs text-terminal-fg/70 hover:text-terminal-fg transition-colors disabled:opacity-50"
+                  >
+                    <action.icon size={14} className="text-terminal-blue" />
+                    <span>{action.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         ) : (
           messages.map((message) => (
@@ -147,6 +194,36 @@ export default function AISidebar() {
 
       {/* Input area */}
       <form onSubmit={handleSubmit} className="p-4 border-t border-[#292e42]">
+        {/* Quick action chips when there are messages */}
+        {messages.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-2">
+            <button
+              type="button"
+              onClick={() => sendMessage('Explain what this command does')}
+              disabled={isLoading}
+              className="px-2 py-1 text-xs bg-[#24283b] hover:bg-[#292e42] rounded text-terminal-fg/60 hover:text-terminal-fg transition-colors disabled:opacity-50"
+            >
+              Explain
+            </button>
+            <button
+              type="button"
+              onClick={() => sendMessage('Show me an alternative command')}
+              disabled={isLoading}
+              className="px-2 py-1 text-xs bg-[#24283b] hover:bg-[#292e42] rounded text-terminal-fg/60 hover:text-terminal-fg transition-colors disabled:opacity-50"
+            >
+              Alternative
+            </button>
+            <button
+              type="button"
+              onClick={() => sendMessage('What could go wrong with this?')}
+              disabled={isLoading}
+              className="px-2 py-1 text-xs bg-[#24283b] hover:bg-[#292e42] rounded text-terminal-fg/60 hover:text-terminal-fg transition-colors disabled:opacity-50"
+            >
+              Risks?
+            </button>
+          </div>
+        )}
+        
         <div className="flex gap-2">
           <textarea
             ref={inputRef}
@@ -171,5 +248,6 @@ export default function AISidebar() {
         </p>
       </form>
     </div>
+    </>
   )
 }
