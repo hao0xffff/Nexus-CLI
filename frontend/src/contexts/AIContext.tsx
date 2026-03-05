@@ -25,10 +25,17 @@ interface CommandExecution {
   output?: string
 }
 
+interface ProviderInfo {
+  provider: 'ollama' | 'openai' | 'custom'
+  model: string
+  name: string  // Display name (e.g., "DeepSeek" for custom)
+}
+
 interface AIContextType {
   messages: ChatMessage[]
   isLoading: boolean
   provider: 'ollama' | 'openai' | 'custom'
+  providerInfo: ProviderInfo | null
   setProvider: (provider: 'ollama' | 'openai' | 'custom') => void
   sendMessage: (message: string) => Promise<void>
   executeCommand: (command: string) => Promise<CommandExecution>
@@ -55,6 +62,7 @@ export function AIProvider({ children }: AIProviderProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [provider, setProvider] = useState<'ollama' | 'openai' | 'custom'>('ollama')
+  const [providerInfo, setProviderInfo] = useState<ProviderInfo | null>(null)
   const [commandExecutions, setCommandExecutions] = useState<CommandExecution[]>([])
   const { activeSessionId, sendInput, getRecentOutput } = useTerminal()
 
@@ -69,12 +77,32 @@ export function AIProvider({ children }: AIProviderProps) {
   const refreshProvider = useCallback(async () => {
     try {
       const backendUrl = await getBackendUrl()
-      const response = await fetch(`${backendUrl}/api/llm/config`)
+      const response = await fetch(`${backendUrl}/api/llm/summary`)
       if (response.ok) {
         const data = await response.json()
-        if (data.activeProvider) {
-          setProvider(data.activeProvider as 'ollama' | 'openai' | 'custom')
+        const activeProvider = data.provider as 'ollama' | 'openai' | 'custom'
+        setProvider(activeProvider)
+        
+        // Build provider info
+        let displayName = activeProvider
+        if (activeProvider === 'custom') {
+          // Try to get custom name from config
+          const configRes = await fetch(`${backendUrl}/api/llm/config`)
+          if (configRes.ok) {
+            const config = await configRes.json()
+            displayName = config.custom?.name || 'Custom'
+          }
+        } else if (activeProvider === 'ollama') {
+          displayName = 'Ollama'
+        } else if (activeProvider === 'openai') {
+          displayName = 'OpenAI'
         }
+        
+        setProviderInfo({
+          provider: activeProvider,
+          model: data.model || '',
+          name: displayName
+        })
       }
     } catch (error) {
       console.error('Failed to refresh provider:', error)
@@ -208,6 +236,7 @@ export function AIProvider({ children }: AIProviderProps) {
     messages,
     isLoading,
     provider,
+    providerInfo,
     setProvider,
     sendMessage,
     executeCommand,

@@ -16,7 +16,7 @@ const QUICK_ACTIONS = [
 ]
 
 export default function AISidebar() {
-  const { messages, isLoading, provider, setProvider, sendMessage, clearHistory, refreshProvider } = useAI()
+  const { messages, isLoading, provider, providerInfo, sendMessage, clearHistory, refreshProvider } = useAI()
   const [input, setInput] = useState('')
   const [showQuickActions, setShowQuickActions] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
@@ -84,8 +84,24 @@ export default function AISidebar() {
         </div>
         <div className="flex items-center gap-2">
           {/* Provider indicator */}
-          <span className="text-xs text-terminal-fg/60 px-2 py-1 bg-[#24283b] rounded">
-            {provider === 'ollama' ? '🟢 Ollama' : provider === 'openai' ? '🟡 OpenAI' : '🟣 Custom'}
+          <span 
+            className="text-xs text-terminal-fg/60 px-2 py-1 bg-[#24283b] rounded max-w-[140px] truncate"
+            title={providerInfo ? `${providerInfo.name}: ${providerInfo.model}` : provider}
+          >
+            {providerInfo ? (
+              <>
+                {provider === 'ollama' ? '🟢' : provider === 'openai' ? '🟡' : '🟣'}{' '}
+                {providerInfo.model ? (
+                  <span className="font-medium">{providerInfo.model}</span>
+                ) : (
+                  providerInfo.name
+                )}
+              </>
+            ) : (
+              <>
+                {provider === 'ollama' ? '🟢 Ollama' : provider === 'openai' ? '🟡 OpenAI' : '🟣 Custom'}
+              </>
+            )}
           </span>
           {/* ReAct Mode Button */}
           <button
