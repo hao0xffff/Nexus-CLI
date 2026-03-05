@@ -265,7 +265,8 @@ public class PtySession extends AbstractTerminalSession {
         java.util.function.Consumer<byte[]> captureHandler = data -> {
             String text = new String(data, StandardCharsets.UTF_8);
             output.append(text);
-            if (text.contains(marker)) {
+            // Check accumulated output for marker (in case marker spans multiple chunks)
+            if (output.toString().contains(marker)) {
                 latch.countDown();
             }
         };
@@ -273,18 +274,37 @@ public class PtySession extends AbstractTerminalSession {
         outputHandlers.add(captureHandler);
 
         try {
-            String fullCommand = command + " && echo " + marker + "\n";
+            // Use semicolon for PowerShell compatibility (works on both bash and PowerShell)
+            // Also use \r for Windows terminal to properly execute
+            String fullCommand;
+            if (systemInspector.isWindows()) {
+                // PowerShell: use semicolon and Write-Output, with newline after marker for clean separation
+                fullCommand = command + "; Write-Output '" + marker + "'\r";
+            } else {
+                // Unix: use && and echo
+                fullCommand = command + " && echo " + marker + "\n";
+            }
+            
+            log.debug("Executing full command: {}", fullCommand.replace("\r", "\\r").replace("\n", "\\n"));
             write(fullCommand);
 
             boolean completed = latch.await(timeoutMs, TimeUnit.MILLISECONDS);
+            
+            // Even if timed out, return what we have
+            String result = output.toString();
+            log.debug("Command output (raw length={}): {}", result.length(), 
+                result.length() > 500 ? result.substring(0, 500) + "..." : result);
+            
             if (!completed) {
-                throw new IOException("Command execution timed out");
+                log.warn("Command timed out, returning partial output. Marker found: {}", result.contains(marker));
+                // Return partial output even on timeout
             }
 
-            String result = output.toString();
             int markerIndex = result.indexOf(marker);
             if (markerIndex > 0) {
                 result = result.substring(0, markerIndex);
+            } else if (markerIndex == 0) {
+                result = "";
             }
 
             return stripAnsiCodes(result);

@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Trash2, Bot, User, AlertTriangle, Play, Loader2, Zap, HelpCircle, Terminal, FileCode, Bug, Settings2, Settings } from 'lucide-react'
+import { Send, Trash2, Bot, User, AlertTriangle, Play, Loader2, Zap, HelpCircle, Terminal, FileCode, Bug, Settings2, Settings, Wand2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAI } from '../contexts/AIContext'
 import CommandCardComponent from './CommandCard'
 import LLMSettings from './LLMSettings'
+import ReActPanel from './ReActPanel'
 
 // Quick action buttons for common queries
 const QUICK_ACTIONS = [
@@ -19,6 +20,7 @@ export default function AISidebar() {
   const [input, setInput] = useState('')
   const [showQuickActions, setShowQuickActions] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
+  const [showReActPanel, setShowReActPanel] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -61,6 +63,11 @@ export default function AISidebar() {
     return cleaned.trim()
   }
 
+  // If ReAct panel is open, show it instead
+  if (showReActPanel) {
+    return <ReActPanel onClose={() => setShowReActPanel(false)} />
+  }
+
   return (
     <>
     <LLMSettings 
@@ -80,6 +87,14 @@ export default function AISidebar() {
           <span className="text-xs text-terminal-fg/60 px-2 py-1 bg-[#24283b] rounded">
             {provider === 'ollama' ? '🟢 Ollama' : provider === 'openai' ? '🟡 OpenAI' : '🟣 Custom'}
           </span>
+          {/* ReAct Mode Button */}
+          <button
+            onClick={() => setShowReActPanel(true)}
+            className="p-1.5 text-terminal-fg/60 hover:text-terminal-magenta rounded transition-colors"
+            title="ReAct Agent Mode (Auto-execute tasks)"
+          >
+            <Wand2 size={14} />
+          </button>
           {/* Settings */}
           <button
             onClick={() => setShowSettings(true)}

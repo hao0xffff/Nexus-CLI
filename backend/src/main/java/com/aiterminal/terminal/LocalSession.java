@@ -258,7 +258,8 @@ public class LocalSession extends AbstractTerminalSession {
         Consumer<byte[]> captureHandler = data -> {
             String text = new String(data, Charset.forName("UTF-8"));
             output.append(text);
-            if (text.contains(marker)) {
+            // Check accumulated output for marker
+            if (output.toString().contains(marker)) {
                 latch.countDown();
             }
         };
@@ -266,20 +267,36 @@ public class LocalSession extends AbstractTerminalSession {
         outputHandlers.add(captureHandler);
         
         try {
-            // Execute command with marker
-            String fullCommand = command + " && echo " + marker + "\n";
+            // Execute command with marker - use platform-specific syntax
+            String fullCommand;
+            if (systemInspector.isWindows()) {
+                // PowerShell: use semicolon and Write-Output, \r for execution
+                fullCommand = command + "; Write-Output '" + marker + "'\r";
+            } else {
+                // Unix: use && and echo
+                fullCommand = command + " && echo " + marker + "\n";
+            }
+            
+            log.debug("Executing full command: {}", fullCommand.replace("\r", "\\r").replace("\n", "\\n"));
             write(fullCommand);
             
             boolean completed = latch.await(timeoutMs, TimeUnit.MILLISECONDS);
+            
+            // Even if timed out, return what we have
+            String result = output.toString();
+            log.debug("Command output (raw length={}): {}", result.length(), 
+                result.length() > 500 ? result.substring(0, 500) + "..." : result);
+            
             if (!completed) {
-                throw new IOException("Command execution timed out");
+                log.warn("Command timed out, returning partial output. Marker found: {}", result.contains(marker));
             }
             
             // Extract output before marker
-            String result = output.toString();
             int markerIndex = result.indexOf(marker);
             if (markerIndex > 0) {
                 result = result.substring(0, markerIndex);
+            } else if (markerIndex == 0) {
+                result = "";
             }
             
             return stripAnsiCodes(result);

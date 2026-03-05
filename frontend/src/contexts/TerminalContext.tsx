@@ -11,6 +11,7 @@ interface SSHConfig {
 
 interface TerminalSession {
   id: string
+  backendSessionId?: string  // The actual terminal session ID from backend
   type: 'local' | 'ssh'
   name: string
   status: 'connecting' | 'connected' | 'disconnected' | 'error'
@@ -21,6 +22,7 @@ interface TerminalSession {
 interface TerminalContextType {
   sessions: TerminalSession[]
   activeSessionId: string | null
+  activeBackendSessionId: string | null  // For ReAct and other backend operations
   createSession: (type: 'local' | 'ssh', config?: SSHConfig) => Promise<void>
   closeSession: (id: string) => void
   setActiveSession: (id: string) => void
@@ -118,8 +120,11 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
 
           switch (message.type) {
             case 'ready':
+              // Store the backend session ID for ReAct and other backend operations
+              const backendId = message.sessionId
+              console.log(`Backend session ID for ${sessionId}: ${backendId}`)
               setSessions(prev => prev.map(s =>
-                s.id === sessionId ? { ...s, status: 'connected' } : s
+                s.id === sessionId ? { ...s, status: 'connected', backendSessionId: backendId } : s
               ))
               break
             case 'closed':
@@ -218,9 +223,15 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
     }
   }, [])
 
+  // Get the backend session ID for the active session
+  const activeBackendSessionId = activeSessionId 
+    ? sessions.find(s => s.id === activeSessionId)?.backendSessionId || null
+    : null
+
   const value: TerminalContextType = {
     sessions,
     activeSessionId,
+    activeBackendSessionId,
     createSession,
     closeSession,
     setActiveSession,
