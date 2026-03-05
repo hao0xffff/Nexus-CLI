@@ -97,11 +97,11 @@ export function AIProvider({ children }: AIProviderProps) {
     try {
       const backendUrl = await getBackendUrl()
       
-      // Get recent terminal output for context
-      const terminalOutput = activeSessionId ? getRecentOutput(activeSessionId, 50) : ''
+      // Get recent terminal output for context (reduced for speed)
+      const terminalOutput = activeSessionId ? getRecentOutput(activeSessionId, 20) : ''
       
-      // Build history (last 10 messages for context)
-      const history = messages.slice(-10).map(m => ({
+      // Build history (last 6 messages for speed)
+      const history = messages.slice(-6).map(m => ({
         role: m.role,
         content: m.content,
       }))
@@ -115,7 +115,7 @@ export function AIProvider({ children }: AIProviderProps) {
           message,
           provider,
           terminalOutput,
-          recentLines: 50,
+          recentLines: 20,
           history,
         }),
       })

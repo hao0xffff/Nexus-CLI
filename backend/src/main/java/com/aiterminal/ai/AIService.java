@@ -112,9 +112,11 @@ public class AIService {
         // Add system prompt
         messages.add(Map.of("role", "system", "content", systemPrompt));
         
-        // Add history
+        // Add history (limit to last 6 messages for speed)
         if (history != null) {
-            for (ChatMessage msg : history) {
+            int startIdx = Math.max(0, history.size() - 6);
+            for (int i = startIdx; i < history.size(); i++) {
+                ChatMessage msg = history.get(i);
                 messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
             }
         }
@@ -135,7 +137,11 @@ public class AIService {
         Map<String, Object> requestBody = Map.of(
                 "model", model,
                 "messages", messages,
-                "stream", false
+                "stream", false,
+                "options", Map.of(
+                    "temperature", 0.3,      // Lower for faster, more deterministic responses
+                    "num_predict", 512       // Limit output tokens
+                )
         );
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
@@ -144,7 +150,7 @@ public class AIService {
                 .uri(URI.create(baseUrl + "/api/chat"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                .timeout(Duration.ofMinutes(2))
+                .timeout(Duration.ofSeconds(90))
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -175,9 +181,11 @@ public class AIService {
         // Add system prompt
         messages.add(Map.of("role", "system", "content", systemPrompt));
         
-        // Add history
+        // Add history (limit to last 6 messages for speed)
         if (history != null) {
-            for (ChatMessage msg : history) {
+            int startIdx = Math.max(0, history.size() - 6);
+            for (int i = startIdx; i < history.size(); i++) {
+                ChatMessage msg = history.get(i);
                 messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
             }
         }
@@ -190,7 +198,8 @@ public class AIService {
         Map<String, Object> requestBody = Map.of(
                 "model", model,
                 "messages", messages,
-                "temperature", 0.7
+                "temperature", 0.3,
+                "max_tokens", 800
         );
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
@@ -200,7 +209,7 @@ public class AIService {
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer " + apiKey)
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                .timeout(Duration.ofMinutes(2))
+                .timeout(Duration.ofSeconds(60))
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -237,9 +246,11 @@ public class AIService {
         // Add system prompt
         messages.add(Map.of("role", "system", "content", systemPrompt));
         
-        // Add history
+        // Add history (limit to last 6 messages for speed)
         if (history != null) {
-            for (ChatMessage msg : history) {
+            int startIdx = Math.max(0, history.size() - 6);
+            for (int i = startIdx; i < history.size(); i++) {
+                ChatMessage msg = history.get(i);
                 messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
             }
         }
@@ -252,7 +263,8 @@ public class AIService {
         Map<String, Object> requestBody = Map.of(
                 "model", model,
                 "messages", messages,
-                "temperature", 0.7
+                "temperature", 0.3,
+                "max_tokens", 800
         );
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
@@ -261,7 +273,7 @@ public class AIService {
                 .uri(URI.create(baseUrl + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                .timeout(Duration.ofMinutes(2));
+                .timeout(Duration.ofSeconds(60));
         
         // Add API key header if configured
         if (apiKey != null && !apiKey.isEmpty()) {
