@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
+import org.springframework.context.ApplicationEventPublisher;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
@@ -21,6 +22,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Service for managing LLM configurations with persistence and hot-reload support.
@@ -32,6 +34,7 @@ public class LLMConfigService {
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
     private final SecureStorage secureStorage;
+    private final ApplicationEventPublisher eventPublisher;
     
     private LLMConfig config;
     private Path configFilePath;
@@ -40,6 +43,17 @@ public class LLMConfigService {
     private List<OllamaModel> ollamaModelsCache = new ArrayList<>();
     private long ollamaModelsCacheTime = 0;
     private static final long CACHE_TTL_MS = 30000; // 30 seconds
+    
+    // Listeners for hot-reload
+    private final List<ConfigChangeListener> changeListeners = new CopyOnWriteArrayList<>();
+    
+    /**
+     * Listener interface for configuration changes.
+     */
+    @FunctionalInterface
+    public interface ConfigChangeListener {
+        void onConfigChanged(String provider, LLMConfig config);
+    }
     
     @Value("${spring.ai.ollama.base-url:http://localhost:11434}")
     private String defaultOllamaUrl;
@@ -56,13 +70,47 @@ public class LLMConfigService {
     @Value("${spring.ai.openai.chat.options.model:gpt-4o}")
     private String defaultOpenaiModel;
 
-    public LLMConfigService(ObjectMapper objectMapper) {
+    public LLMConfigService(ObjectMapper objectMapper, ApplicationEventPublisher eventPublisher) {
         this.objectMapper = objectMapper.copy();
         this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
         this.secureStorage = SecureStorage.getInstance();
+        this.eventPublisher = eventPublisher;
+    }
+    
+    /**
+     * Register a listener for configuration changes.
+     */
+    public void addChangeListener(ConfigChangeListener listener) {
+        changeListeners.add(listener);
+    }
+    
+    /**
+     * Remove a configuration change listener.
+     */
+    public void removeChangeListener(ConfigChangeListener listener) {
+        changeListeners.remove(listener);
+    }
+    
+    /**
+     * Notify all listeners of a configuration change.
+     */
+    private void notifyConfigChanged(String reason) {
+        String provider = config.getActiveProvider();
+        log.info("LLM config changed ({}): provider={}", reason, provider);
+        
+        for (ConfigChangeListener listener : changeListeners) {
+            try {
+                listener.onConfigChanged(provider, config);
+            } catch (Exception e) {
+                log.warn("Error notifying config change listener", e);
+            }
+        }
+        
+        // Also publish Spring event
+        eventPublisher.publishEvent(new LLMConfigChangedEvent(this, provider, config));
     }
 
     @PostConstruct
@@ -251,7 +299,7 @@ public class LLMConfigService {
     public void updateConfig(LLMConfig newConfig) {
         this.config = newConfig;
         saveConfig();
-        log.info("LLM config updated: activeProvider={}", newConfig.getActiveProvider());
+        notifyConfigChanged("full update");
     }
 
     /**
@@ -269,6 +317,7 @@ public class LLMConfigService {
         }
         config.getOllama().setEnabled(true);
         saveConfig();
+        notifyConfigChanged("ollama config updated");
     }
 
     /**
@@ -289,6 +338,7 @@ public class LLMConfigService {
         }
         config.getOpenai().setEnabled(true);
         saveConfig();
+        notifyConfigChanged("openai config updated");
     }
 
     /**
@@ -304,14 +354,95 @@ public class LLMConfigService {
         config.getCustom().setModel(model);
         config.getCustom().setEnabled(true);
         saveConfig();
+        notifyConfigChanged("custom config updated");
     }
 
     /**
      * Set active provider.
      */
     public void setActiveProvider(String provider) {
+        String oldProvider = config.getActiveProvider();
         config.setActiveProvider(provider);
         saveConfig();
+        if (!provider.equals(oldProvider)) {
+            notifyConfigChanged("provider switched from " + oldProvider + " to " + provider);
+        }
+    }
+    
+    /**
+     * Validate the current configuration.
+     */
+    public ConfigValidationResult validateConfig() {
+        String provider = config.getActiveProvider();
+        
+        switch (provider) {
+            case "ollama":
+                if (config.getOllama() == null || config.getOllama().getModel() == null || config.getOllama().getModel().isEmpty()) {
+                    return ConfigValidationResult.invalid("Ollama model not configured");
+                }
+                if (config.getOllama().getBaseUrl() == null || config.getOllama().getBaseUrl().isEmpty()) {
+                    return ConfigValidationResult.invalid("Ollama base URL not configured");
+                }
+                break;
+                
+            case "openai":
+                if (config.getOpenai() == null || config.getOpenai().getApiKey() == null || config.getOpenai().getApiKey().isEmpty()) {
+                    return ConfigValidationResult.invalid("OpenAI API key not configured");
+                }
+                if (config.getOpenai().getModel() == null || config.getOpenai().getModel().isEmpty()) {
+                    return ConfigValidationResult.invalid("OpenAI model not configured");
+                }
+                break;
+                
+            case "custom":
+                if (config.getCustom() == null) {
+                    return ConfigValidationResult.invalid("Custom API not configured");
+                }
+                if (config.getCustom().getBaseUrl() == null || config.getCustom().getBaseUrl().isEmpty()) {
+                    return ConfigValidationResult.invalid("Custom API base URL not configured");
+                }
+                if (config.getCustom().getApiKey() == null || config.getCustom().getApiKey().isEmpty()) {
+                    return ConfigValidationResult.invalid("Custom API key not configured");
+                }
+                if (config.getCustom().getModel() == null || config.getCustom().getModel().isEmpty()) {
+                    return ConfigValidationResult.invalid("Custom API model not configured");
+                }
+                break;
+                
+            default:
+                return ConfigValidationResult.invalid("Unknown provider: " + provider);
+        }
+        
+        return ConfigValidationResult.valid();
+    }
+    
+    /**
+     * Get a summary of the current configuration.
+     */
+    public ConfigSummary getConfigSummary() {
+        String provider = config.getActiveProvider();
+        String model = "";
+        String baseUrl = "";
+        boolean hasApiKey = false;
+        
+        switch (provider) {
+            case "ollama":
+                model = getOllamaModel();
+                baseUrl = getOllamaBaseUrl();
+                break;
+            case "openai":
+                model = getOpenAIModel();
+                baseUrl = getOpenAIBaseUrl();
+                hasApiKey = config.getOpenai() != null && config.getOpenai().getApiKey() != null && !config.getOpenai().getApiKey().isEmpty();
+                break;
+            case "custom":
+                model = config.getCustom() != null ? config.getCustom().getModel() : "";
+                baseUrl = config.getCustom() != null ? config.getCustom().getBaseUrl() : "";
+                hasApiKey = config.getCustom() != null && config.getCustom().getApiKey() != null && !config.getCustom().getApiKey().isEmpty();
+                break;
+        }
+        
+        return new ConfigSummary(provider, model, baseUrl, hasApiKey, validateConfig().isValid());
     }
 
     /**
@@ -490,6 +621,59 @@ public class LLMConfigService {
         
         public static ConnectionTestResult failure(String message) {
             return new ConnectionTestResult(false, message);
+        }
+    }
+    
+    /**
+     * Configuration validation result.
+     */
+    @lombok.Data
+    @lombok.AllArgsConstructor
+    public static class ConfigValidationResult {
+        private boolean valid;
+        private String message;
+        
+        public static ConfigValidationResult valid() {
+            return new ConfigValidationResult(true, "Configuration is valid");
+        }
+        
+        public static ConfigValidationResult invalid(String message) {
+            return new ConfigValidationResult(false, message);
+        }
+    }
+    
+    /**
+     * Configuration summary for display.
+     */
+    @lombok.Data
+    @lombok.AllArgsConstructor
+    public static class ConfigSummary {
+        private String provider;
+        private String model;
+        private String baseUrl;
+        private boolean hasApiKey;
+        private boolean isValid;
+    }
+    
+    /**
+     * Spring event for configuration changes.
+     */
+    public static class LLMConfigChangedEvent extends org.springframework.context.ApplicationEvent {
+        private final String provider;
+        private final LLMConfig config;
+        
+        public LLMConfigChangedEvent(Object source, String provider, LLMConfig config) {
+            super(source);
+            this.provider = provider;
+            this.config = config;
+        }
+        
+        public String getProvider() {
+            return provider;
+        }
+        
+        public LLMConfig getConfig() {
+            return config;
         }
     }
 }

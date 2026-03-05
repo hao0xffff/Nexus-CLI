@@ -168,4 +168,40 @@ public class LLMConfigController {
                 "active", configService.getActiveProvider()
         ));
     }
+    
+    /**
+     * Get configuration summary.
+     */
+    @GetMapping("/summary")
+    public ResponseEntity<LLMConfigService.ConfigSummary> getSummary() {
+        return ResponseEntity.ok(configService.getConfigSummary());
+    }
+    
+    /**
+     * Validate current configuration.
+     */
+    @GetMapping("/validate")
+    public ResponseEntity<LLMConfigService.ConfigValidationResult> validateConfig() {
+        return ResponseEntity.ok(configService.validateConfig());
+    }
+    
+    /**
+     * Test Custom API connection (DeepSeek, Anthropic, etc.).
+     */
+    @PostMapping("/custom/test")
+    public ResponseEntity<LLMConfigService.ConnectionTestResult> testCustom(@RequestBody Map<String, String> request) {
+        String baseUrl = request.get("baseUrl");
+        String apiKey = request.get("apiKey");
+        
+        if (baseUrl == null || baseUrl.isEmpty()) {
+            return ResponseEntity.ok(LLMConfigService.ConnectionTestResult.failure("Base URL is required"));
+        }
+        if (apiKey == null || apiKey.isEmpty()) {
+            return ResponseEntity.ok(LLMConfigService.ConnectionTestResult.failure("API key is required"));
+        }
+        
+        // Use OpenAI-compatible test for custom APIs
+        LLMConfigService.ConnectionTestResult result = configService.testOpenAIConnection(baseUrl, apiKey);
+        return ResponseEntity.ok(result);
+    }
 }
