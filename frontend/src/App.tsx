@@ -3,6 +3,7 @@ import Terminal from './components/Terminal'
 import AISidebar from './components/AISidebar'
 import TitleBar from './components/TitleBar'
 import ConnectionDialog from './components/ConnectionDialog'
+import ErrorBoundary from './components/ErrorBoundary'
 import { TerminalProvider, useTerminal } from './contexts/TerminalContext'
 import { AIProvider } from './contexts/AIContext'
 import { PanelLeftClose, PanelLeft, Plus, Settings } from 'lucide-react'
@@ -132,11 +133,13 @@ function AppContent() {
 
 function App() {
   return (
-    <TerminalProvider>
-      <AIProvider>
-        <AppContent />
-      </AIProvider>
-    </TerminalProvider>
+    <ErrorBoundary>
+      <TerminalProvider>
+        <AIProvider>
+          <AppContent />
+        </AIProvider>
+      </TerminalProvider>
+    </ErrorBoundary>
   )
 }
 

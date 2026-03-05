@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { Play, Square, Bot, Loader2, CheckCircle2, XCircle, AlertTriangle, ChevronDown, ChevronRight, Terminal } from 'lucide-react'
 import { useTerminal } from '../contexts/TerminalContext'
 
@@ -22,8 +22,9 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
   const [steps, setSteps] = useState<ReActStep[]>([])
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
   const { activeSessionId, activeBackendSessionId } = useTerminal()
-  const eventSourceRef = useRef<EventSource | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
   const stepsEndRef = useRef<HTMLDivElement>(null)
+  const isMountedRef = useRef(true)
 
   const getBackendUrl = async () => {
     if (window.electronAPI) {
@@ -32,13 +33,33 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
     return 'http://localhost:8080'
   }
 
+  // Track mounted state for cleanup
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+      // Abort any running request on unmount
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
+  }, [])
+
   // Auto-scroll to bottom when new steps arrive
   useEffect(() => {
     stepsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [steps])
 
-  const startTask = async () => {
+  const startTask = useCallback(async () => {
     if (!task.trim() || !activeBackendSessionId) return
+
+    // Abort any previous request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
 
     setIsRunning(true)
     setSteps([])
@@ -60,6 +81,7 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
           sessionId: activeBackendSessionId,
           task: task.trim(),
         }),
+        signal: abortController.signal,
       })
 
       if (!response.ok) {
@@ -76,10 +98,16 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
       let buffer = ''
 
       while (true) {
+        // Check if aborted
+        if (abortController.signal.aborted) {
+          reader.cancel()
+          break
+        }
+
         const { done, value } = await reader.read()
         
         if (done) {
-          setIsRunning(false)
+          if (isMountedRef.current) setIsRunning(false)
           break
         }
 
@@ -92,7 +120,7 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
         for (const line of lines) {
           if (line.startsWith('data:')) {
             const data = line.slice(5).trim()
-            if (data) {
+            if (data && isMountedRef.current) {
               try {
                 const step: ReActStep = JSON.parse(data)
                 setSteps(prev => {
@@ -121,32 +149,49 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
         }
       }
     } catch (error) {
+      // Ignore abort errors
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.log('ReAct task aborted')
+        return
+      }
+      
       console.error('ReAct task failed:', error)
-      setSteps(prev => [...prev, {
-        stepNumber: -1,
-        thought: 'Task failed',
-        action: 'ERROR',
-        actionInput: error instanceof Error ? error.message : 'Unknown error',
-        status: 'ERROR',
-        timestamp: Date.now(),
-      }])
-      setIsRunning(false)
+      if (isMountedRef.current) {
+        setSteps(prev => [...prev, {
+          stepNumber: -1,
+          thought: 'Task failed',
+          action: 'ERROR',
+          actionInput: error instanceof Error ? error.message : 'Unknown error',
+          status: 'ERROR',
+          timestamp: Date.now(),
+        }])
+        setIsRunning(false)
+      }
     }
-  }
+  }, [task, activeBackendSessionId])
 
-  const cancelTask = async () => {
+  const cancelTask = useCallback(async () => {
     if (!activeBackendSessionId) return
+
+    // Abort the fetch stream
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
 
     try {
       const backendUrl = await getBackendUrl()
       await fetch(`${backendUrl}/api/react/cancel/${activeBackendSessionId}`, {
         method: 'POST',
       })
-      setIsRunning(false)
     } catch (error) {
       console.error('Failed to cancel task:', error)
     }
-  }
+    
+    if (isMountedRef.current) {
+      setIsRunning(false)
+    }
+  }, [activeBackendSessionId])
 
   const toggleStep = (stepNumber: number) => {
     setExpandedSteps(prev => {
@@ -324,9 +369,24 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
                 {/* Output */}
                 {step.output && (
                   <div>
-                    <div className="text-xs text-terminal-fg/50 mb-1">📤 Output</div>
-                    <pre className="text-xs bg-[#1a1b26] p-2 rounded text-terminal-fg/70 font-mono whitespace-pre-wrap max-h-32 overflow-auto">
-                      {step.output}
+                    <div className="text-xs text-terminal-fg/50 mb-1">
+                      📤 Output
+                      {step.output.includes('[STDERR]') && (
+                        <span className="ml-2 text-terminal-yellow">(contains errors)</span>
+                      )}
+                      {step.output.includes('[Command timed out]') && (
+                        <span className="ml-2 text-terminal-yellow">(timed out)</span>
+                      )}
+                    </div>
+                    <pre className="text-xs bg-[#1a1b26] p-2 rounded text-terminal-fg/70 font-mono whitespace-pre-wrap max-h-48 overflow-auto">
+                      {step.output === 'Executing command...' ? (
+                        <span className="flex items-center gap-2">
+                          <Loader2 size={12} className="animate-spin" />
+                          Executing command...
+                        </span>
+                      ) : (
+                        step.output
+                      )}
                     </pre>
                   </div>
                 )}
@@ -350,7 +410,17 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
         <div className="px-4 py-2 border-t border-[#414868] bg-[#24283b]">
           <div className="flex items-center gap-2 text-sm text-terminal-blue">
             <Loader2 size={14} className="animate-spin" />
-            <span>Agent is working...</span>
+            <span>Agent is working... (complex operations may take a few minutes)</span>
+          </div>
+        </div>
+      )}
+      
+      {/* Completed Status */}
+      {!isRunning && steps.length > 0 && steps[steps.length - 1]?.status === 'COMPLETED' && (
+        <div className="px-4 py-2 border-t border-[#414868] bg-terminal-green/10">
+          <div className="flex items-center gap-2 text-sm text-terminal-green">
+            <CheckCircle2 size={14} />
+            <span>Task completed successfully</span>
           </div>
         </div>
       )}

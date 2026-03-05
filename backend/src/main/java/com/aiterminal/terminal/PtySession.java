@@ -262,10 +262,15 @@ public class PtySession extends AbstractTerminalSession {
         String marker = "###CMD_END_" + System.currentTimeMillis() + "###";
         StringBuilder output = new StringBuilder();
         CountDownLatch latch = new CountDownLatch(1);
+        
+        // Track when we last received output (for detecting idle state)
+        final long[] lastOutputTime = {System.currentTimeMillis()};
 
         java.util.function.Consumer<byte[]> captureHandler = data -> {
             String text = new String(data, StandardCharsets.UTF_8);
             output.append(text);
+            lastOutputTime[0] = System.currentTimeMillis();
+            
             // Check accumulated output for marker (in case marker spans multiple chunks)
             if (output.toString().contains(marker)) {
                 latch.countDown();
@@ -289,26 +294,109 @@ public class PtySession extends AbstractTerminalSession {
             log.debug("Executing full command: {}", fullCommand.replace("\r", "\\r").replace("\n", "\\n"));
             write(fullCommand);
 
-            boolean completed = latch.await(timeoutMs, TimeUnit.MILLISECONDS);
+            // Wait for completion with periodic checks
+            long startTime = System.currentTimeMillis();
+            boolean completed = false;
             
-            // Even if timed out, return what we have
+            while (System.currentTimeMillis() - startTime < timeoutMs) {
+                completed = latch.await(1000, TimeUnit.MILLISECONDS);
+                if (completed) {
+                    break;
+                }
+                
+                // If no output for 3 seconds after initial output, might be done (marker missed)
+                long idleTime = System.currentTimeMillis() - lastOutputTime[0];
+                if (output.length() > 0 && idleTime > 3000) {
+                    log.debug("No output for {}ms, checking if command completed", idleTime);
+                    // Give a bit more time for marker
+                    Thread.sleep(500);
+                    if (output.toString().contains(marker)) {
+                        completed = true;
+                        break;
+                    }
+                }
+            }
+            
+            // Wait a bit more for final output
+            Thread.sleep(200);
+            
+            // Get final result
             String result = output.toString();
             log.debug("Command output (raw length={}): {}", result.length(), 
                 result.length() > 500 ? result.substring(0, 500) + "..." : result);
             
             if (!completed) {
-                log.warn("Command timed out, returning partial output. Marker found: {}", result.contains(marker));
-                // Return partial output even on timeout
+                log.warn("Command timed out after {}ms, returning partial output. Marker found: {}", 
+                    timeoutMs, result.contains(marker));
             }
 
-            int markerIndex = result.indexOf(marker);
+            // First strip ANSI codes for cleaner parsing
+            String cleanResult = stripAnsiCodes(result);
+            log.debug("After ANSI strip (length={}): {}", cleanResult.length(),
+                cleanResult.length() > 300 ? cleanResult.substring(0, 300) + "..." : cleanResult);
+            
+            // Extract actual command output using marker
+            int markerIndex = cleanResult.indexOf(marker);
             if (markerIndex > 0) {
-                result = result.substring(0, markerIndex);
-            } else if (markerIndex == 0) {
-                result = "";
+                cleanResult = cleanResult.substring(0, markerIndex);
             }
-
-            return stripAnsiCodes(result);
+            
+            // Parse output line by line
+            String[] lines = cleanResult.split("\\r?\\n");
+            StringBuilder actualOutput = new StringBuilder();
+            boolean passedCommandLine = false;
+            
+            for (int i = 0; i < lines.length; i++) {
+                String line = lines[i];
+                String trimmedLine = line.trim();
+                
+                // Remove any remaining control characters like [0], [0K], etc.
+                trimmedLine = trimmedLine.replaceAll("\\[\\d+[A-Za-z]?\\]?", "").trim();
+                
+                log.trace("Line {}: '{}' (passedCmd={})", i, trimmedLine, passedCommandLine);
+                
+                // Skip empty lines
+                if (trimmedLine.isEmpty()) {
+                    continue;
+                }
+                
+                // Skip PowerShell prompts (PS C:\path>)
+                if (trimmedLine.matches("^PS\\s+[A-Za-z]:\\\\.*>.*")) {
+                    // This is the command line, mark that we passed it
+                    passedCommandLine = true;
+                    continue;
+                }
+                
+                // Skip lines containing the marker
+                if (trimmedLine.contains("###CMD_END_")) {
+                    continue;
+                }
+                
+                // Skip lines containing Write-Output (part of our marker command)
+                if (trimmedLine.contains("Write-Output")) {
+                    passedCommandLine = true;
+                    continue;
+                }
+                
+                // If we haven't passed the command line yet, and this line contains the command
+                // (this handles cases where the prompt wasn't captured properly)
+                if (!passedCommandLine && trimmedLine.contains(command.substring(0, Math.min(command.length(), 20)))) {
+                    passedCommandLine = true;
+                    continue;
+                }
+                
+                // This is actual output - collect it
+                if (actualOutput.length() > 0) {
+                    actualOutput.append("\n");
+                }
+                actualOutput.append(trimmedLine);
+            }
+            
+            String finalOutput = actualOutput.toString().trim();
+            log.debug("Final extracted output (length={}): '{}'", finalOutput.length(), 
+                finalOutput.length() > 200 ? finalOutput.substring(0, 200) + "..." : finalOutput);
+            
+            return finalOutput;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException("Command execution interrupted", e);

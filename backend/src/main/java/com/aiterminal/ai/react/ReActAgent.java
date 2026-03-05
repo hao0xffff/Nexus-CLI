@@ -3,6 +3,8 @@ package com.aiterminal.ai.react;
 import com.aiterminal.ai.CommandGuard;
 import com.aiterminal.ai.config.LLMConfigService;
 import com.aiterminal.ai.dto.ChatMessage;
+import com.aiterminal.terminal.CommandExecutor;
+import com.aiterminal.terminal.CommandExecutor.CommandResult;
 import com.aiterminal.terminal.ITerminalSession;
 import com.aiterminal.terminal.TerminalSessionManager;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,6 +30,8 @@ import java.util.regex.Pattern;
 /**
  * ReAct Agent that can autonomously execute multi-step tasks.
  * Implements the ReAct (Reasoning + Acting) paradigm.
+ * 
+ * Uses CommandExecutor for clean command output capture instead of PTY terminal parsing.
  */
 @Slf4j
 @Service
@@ -38,10 +42,12 @@ public class ReActAgent {
     private final CommandGuard commandGuard;
     private final LLMConfigService configService;
     private final TerminalSessionManager sessionManager;
+    private final CommandExecutor commandExecutor;
     private final ObjectMapper objectMapper;
 
-    private static final int MAX_STEPS = 10;
-    private static final long COMMAND_TIMEOUT_MS = 30000;
+    private static final int MAX_STEPS = 30;  // For complex multi-step tasks
+    private static final long DEFAULT_COMMAND_TIMEOUT_MS = 60000;  // Default 60 seconds
+    private static final long MAX_COMMAND_TIMEOUT_MS = 300000;  // Max 5 minutes for long operations
 
     // Pattern to parse ReAct response
     private static final Pattern THOUGHT_PATTERN = Pattern.compile(
@@ -73,14 +79,16 @@ public class ReActAgent {
      * Main ReAct execution loop.
      */
     private void runReActLoop(String sessionId, String task, Consumer<ReActStep> stepCallback) throws Exception {
-        ITerminalSession session = sessionManager.getSession(sessionId).orElse(null);
-        if (session == null || !session.isActive()) {
+        // Verify terminal session exists (for display purposes)
+        ITerminalSession terminalSession = sessionManager.getSession(sessionId).orElse(null);
+        if (terminalSession == null || !terminalSession.isActive()) {
             stepCallback.accept(ReActStep.error("Terminal session not found or inactive"));
             return;
         }
 
         String systemPrompt = reactPrompt.buildSystemPrompt();
-        String currentDir = session.getCurrentDirectory();
+        // Use CommandExecutor's directory tracking instead of terminal session
+        String currentDir = commandExecutor.getSessionDirectory(sessionId);
         
         List<ChatMessage> conversationHistory = new ArrayList<>();
         String userMessage = reactPrompt.buildTaskMessage(task, currentDir);
@@ -145,15 +153,54 @@ public class ReActAgent {
                         continue;
                     }
 
-                    // Execute command
-                    String output = executeCommand(session, command);
-                    stepResult.setOutput(output);
-                    stepResult.setStatus(ReActStatus.RUNNING);
+                    // FIRST: Echo command to terminal so user sees it immediately
+                    try {
+                        terminalSession.write(command + "\r");
+                        Thread.sleep(100); // Brief pause to let terminal display the command
+                    } catch (Exception e) {
+                        log.warn("Failed to echo command to terminal: {}", e.getMessage());
+                    }
+                    
+                    // Calculate smart timeout based on command type
+                    long timeout = commandExecutor.estimateTimeout(command);
+                    log.info("Executing command with {}ms timeout: {}", timeout, command);
+                    
+                    // Update step to show command is executing
+                    stepResult.setOutput("Executing command...");
+                    stepCallback.accept(stepResult);
+                    
+                    // Execute command using CommandExecutor (clean output capture)
+                    CommandResult cmdResult = commandExecutor.execute(sessionId, command, timeout, 
+                        line -> {
+                            // Real-time output streaming (optional enhancement for future)
+                            log.debug("Command output line: {}", line);
+                        });
+                    
+                    // Update step with final result
+                    stepResult.setOutput(cmdResult.getCombinedOutput());
+                    
+                    // Determine status based on result
+                    if (cmdResult.isTimedOut()) {
+                        stepResult.setStatus(ReActStatus.RUNNING); // Continue despite timeout
+                        log.warn("Command timed out but continuing with partial output");
+                    } else if (cmdResult.isCancelled()) {
+                        stepResult.setStatus(ReActStatus.CANCELLED);
+                    } else if (cmdResult.isSuccess()) {
+                        stepResult.setStatus(ReActStatus.RUNNING);
+                    } else {
+                        // Command failed but we can still continue
+                        stepResult.setStatus(ReActStatus.RUNNING);
+                    }
+                    
                     stepCallback.accept(stepResult);
 
-                    // Prepare continuation message
-                    userMessage = reactPrompt.buildContinuationMessage(output, true);
+                    // Prepare continuation message with detailed output info
+                    String outputForLLM = buildOutputMessage(cmdResult);
+                    userMessage = reactPrompt.buildContinuationMessage(outputForLLM, cmdResult.isSuccess());
                     conversationHistory.add(new ChatMessage("user", userMessage, System.currentTimeMillis()));
+                    
+                    // Update current directory from CommandExecutor
+                    currentDir = commandExecutor.getSessionDirectory(sessionId);
                 }
                 case "OBSERVE" -> {
                     // OBSERVE is typically used after EXECUTE, continue loop
@@ -171,6 +218,43 @@ public class ReActAgent {
 
         // Max steps reached
         stepCallback.accept(ReActStep.error("Maximum steps (" + MAX_STEPS + ") reached. Task may be incomplete."));
+    }
+    
+    /**
+     * Build a detailed output message for LLM consumption.
+     */
+    private String buildOutputMessage(CommandResult result) {
+        StringBuilder sb = new StringBuilder();
+        
+        sb.append("Exit Code: ").append(result.getExitCode()).append("\n");
+        sb.append("Execution Time: ").append(result.getExecutionTimeMs()).append("ms\n");
+        
+        if (result.isTimedOut()) {
+            sb.append("Status: TIMED OUT (partial output may be available)\n");
+        } else if (result.isCancelled()) {
+            sb.append("Status: CANCELLED\n");
+        } else if (result.isSuccess()) {
+            sb.append("Status: SUCCESS\n");
+        } else {
+            sb.append("Status: FAILED (exit code ").append(result.getExitCode()).append(")\n");
+        }
+        
+        sb.append("\n--- Output ---\n");
+        String output = result.getCombinedOutput();
+        if (output.isEmpty() || output.isBlank()) {
+            sb.append("(no output)\n");
+        } else {
+            // Limit output size to avoid context overflow
+            if (output.length() > 4000) {
+                sb.append(output.substring(0, 2000));
+                sb.append("\n... (output truncated, ").append(output.length() - 4000).append(" chars omitted) ...\n");
+                sb.append(output.substring(output.length() - 2000));
+            } else {
+                sb.append(output);
+            }
+        }
+        
+        return sb.toString();
     }
 
     /**
@@ -211,18 +295,7 @@ public class ReActAgent {
         }
     }
 
-    /**
-     * Execute a command in the terminal session.
-     */
-    private String executeCommand(ITerminalSession session, String command) {
-        try {
-            log.info("Executing command: {}", command);
-            return session.executeCommand(command, COMMAND_TIMEOUT_MS);
-        } catch (Exception e) {
-            log.error("Command execution failed: {}", command, e);
-            return "Error: " + e.getMessage();
-        }
-    }
+    // executeCommand method removed - now using commandExecutor directly with smart timeout
 
     /**
      * Call the LLM API.
@@ -233,10 +306,8 @@ public class ReActAgent {
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", systemPrompt));
         
-        // Add history (limit to prevent context overflow)
-        int startIdx = Math.max(0, history.size() - 10);
-        for (int i = startIdx; i < history.size(); i++) {
-            ChatMessage msg = history.get(i);
+        // Add full conversation history for complete context understanding
+        for (ChatMessage msg : history) {
             messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
         }
         
@@ -259,8 +330,9 @@ public class ReActAgent {
                 "messages", messages,
                 "stream", false,
                 "options", Map.of(
-                        "temperature", 0.2,
-                        "num_predict", 1024
+                        "temperature", 0.3,
+                        "num_predict", 2048,  // Increased for longer responses
+                        "num_ctx", 8192       // Larger context window
                 )
         );
 
@@ -291,8 +363,8 @@ public class ReActAgent {
         Map<String, Object> requestBody = Map.of(
                 "model", model,
                 "messages", messages,
-                "temperature", 0.2,
-                "max_tokens", 1024
+                "temperature", 0.3,
+                "max_tokens", 2048  // Increased for longer responses
         );
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
@@ -313,7 +385,11 @@ public class ReActAgent {
         }
 
         JsonNode responseJson = objectMapper.readTree(response.body());
-        return responseJson.path("choices").get(0).path("message").path("content").asText();
+        JsonNode choices = responseJson.path("choices");
+        if (choices.isMissingNode() || !choices.isArray() || choices.isEmpty()) {
+            throw new RuntimeException("Invalid OpenAI API response: no choices in response");
+        }
+        return choices.get(0).path("message").path("content").asText();
     }
 
     private String callCustomAPI(List<Map<String, String>> messages) throws Exception {
@@ -325,8 +401,8 @@ public class ReActAgent {
         Map<String, Object> requestBody = Map.of(
                 "model", model,
                 "messages", messages,
-                "temperature", 0.2,
-                "max_tokens", 1024
+                "temperature", 0.3,
+                "max_tokens", 2048  // Increased for longer responses
         );
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
@@ -335,7 +411,7 @@ public class ReActAgent {
                 .uri(URI.create(baseUrl + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                .timeout(Duration.ofSeconds(60));
+                .timeout(Duration.ofSeconds(120));  // Longer timeout for complex tasks
 
         if (apiKey != null && !apiKey.isEmpty()) {
             requestBuilder.header("Authorization", "Bearer " + apiKey);
@@ -349,7 +425,11 @@ public class ReActAgent {
         }
 
         JsonNode responseJson = objectMapper.readTree(response.body());
-        return responseJson.path("choices").get(0).path("message").path("content").asText();
+        JsonNode choices = responseJson.path("choices");
+        if (choices.isMissingNode() || !choices.isArray() || choices.isEmpty()) {
+            throw new RuntimeException("Invalid Custom API response: no choices in response");
+        }
+        return choices.get(0).path("message").path("content").asText();
     }
 
     /**

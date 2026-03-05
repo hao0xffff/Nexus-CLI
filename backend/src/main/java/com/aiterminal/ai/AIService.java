@@ -219,7 +219,11 @@ public class AIService {
         }
 
         JsonNode responseJson = objectMapper.readTree(response.body());
-        return responseJson.path("choices").get(0).path("message").path("content").asText();
+        JsonNode choices = responseJson.path("choices");
+        if (choices.isMissingNode() || !choices.isArray() || choices.isEmpty()) {
+            throw new RuntimeException("Invalid OpenAI API response: no choices");
+        }
+        return choices.get(0).path("message").path("content").asText();
     }
 
     /**
@@ -289,7 +293,11 @@ public class AIService {
         }
 
         JsonNode responseJson = objectMapper.readTree(response.body());
-        return responseJson.path("choices").get(0).path("message").path("content").asText();
+        JsonNode choices = responseJson.path("choices");
+        if (choices.isMissingNode() || !choices.isArray() || choices.isEmpty()) {
+            throw new RuntimeException("Invalid Custom API response: no choices");
+        }
+        return choices.get(0).path("message").path("content").asText();
     }
 
     /**

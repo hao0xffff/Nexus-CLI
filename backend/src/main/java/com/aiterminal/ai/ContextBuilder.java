@@ -85,7 +85,7 @@ public class ContextBuilder {
             return userQuery;
         }
         
-        return String.format(USER_CONTEXT_TEMPLATE, recentLines, terminalOutput, userQuery);
+        return String.format(USER_CONTEXT_TEMPLATE, terminalOutput, userQuery);
     }
 
     /**

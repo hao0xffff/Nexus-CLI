@@ -169,7 +169,9 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
       websocketsRef.current.delete(id)
     }
 
+    // Clean up all refs for this session
     outputBuffersRef.current.delete(id)
+    terminalWritersRef.current.delete(id) // Fix: also remove terminal writer to prevent memory leak
     
     setSessions(prev => {
       const remaining = prev.filter(s => s.id !== id)
@@ -220,6 +222,8 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
     return () => {
       websocketsRef.current.forEach(ws => ws.close())
       websocketsRef.current.clear()
+      outputBuffersRef.current.clear()
+      terminalWritersRef.current.clear() // Clean up all terminal writers
     }
   }, [])
 

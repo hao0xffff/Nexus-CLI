@@ -17,8 +17,21 @@ import java.util.regex.Pattern;
 public abstract class AbstractTerminalSession implements ITerminalSession {
 
     // ANSI escape sequence pattern for stripping terminal control codes
+    // This pattern handles:
+    // - Standard ANSI escapes: \x1B[...
+    // - CSI sequences: \x1B[0m, \x1B[31;91m, etc.
+    // - Cursor controls: \x1B[?25l, \x1B[?25h
+    // - OSC sequences: \x1B]...
     private static final Pattern ANSI_PATTERN = Pattern.compile(
-            "\\x1B(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])"
+            "\\x1B(?:" +
+            "[@-Z\\\\-_]|" +                           // Single-char escapes
+            "\\[[0-?]*[ -/]*[@-~]|" +                  // CSI sequences
+            "\\][^\\x07\\x1B]*(?:\\x07|\\x1B\\\\)|" +  // OSC sequences
+            "\\[[\\d;]*[A-Za-z]" +                     // Numbered sequences
+            ")|" +
+            "\\[\\?\\d+[a-z]|" +                       // Cursor visibility like [?25l
+            "\\[\\d*[A-Za-z]|" +                       // Simple control like [0K
+            "\\[\\d+;?\\d*[A-Za-z]"                    // Color codes like [0;33;93m
     );
 
     @Getter

@@ -74,18 +74,29 @@ public class SystemInspector {
 
     private String detectDefaultShellPath() {
         if (osType == OSType.WINDOWS) {
-            // Check for PowerShell first
+            // Check for PowerShell Core first
             String pwshPath = findExecutable("pwsh");
             if (pwshPath != null) {
                 return pwshPath;
             }
+            
             // Fallback to Windows PowerShell
-            String powershellPath = System.getenv("SYSTEMROOT") + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+            String systemRoot = System.getenv("SYSTEMROOT");
+            if (systemRoot == null || systemRoot.isEmpty()) {
+                systemRoot = "C:\\Windows"; // Safe fallback
+            }
+            String powershellPath = systemRoot + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
             if (Paths.get(powershellPath).toFile().exists()) {
                 return powershellPath;
             }
+            
             // Fallback to cmd
-            return System.getenv("COMSPEC");
+            String comspec = System.getenv("COMSPEC");
+            if (comspec != null && !comspec.isEmpty()) {
+                return comspec;
+            }
+            // Ultimate fallback
+            return "C:\\Windows\\System32\\cmd.exe";
         } else {
             // Unix-like systems: check SHELL environment variable
             String shell = System.getenv("SHELL");
@@ -98,12 +109,13 @@ public class SystemInspector {
     }
 
     private String findExecutable(String name) {
+        Process process = null;
         try {
             ProcessBuilder pb = osType == OSType.WINDOWS
                     ? new ProcessBuilder("where", name)
                     : new ProcessBuilder("which", name);
             pb.redirectErrorStream(true);
-            Process process = pb.start();
+            process = pb.start();
 
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line = reader.readLine();
@@ -114,6 +126,10 @@ public class SystemInspector {
             }
         } catch (Exception e) {
             log.debug("Failed to find executable: {}", name, e);
+        } finally {
+            if (process != null) {
+                process.destroyForcibly();
+            }
         }
         return null;
     }

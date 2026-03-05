@@ -43,13 +43,29 @@ public class LLMConfigController {
      * Set active provider.
      */
     @PostMapping("/provider")
-    public ResponseEntity<Map<String, String>> setProvider(@RequestBody Map<String, String> request) {
+    public ResponseEntity<Map<String, Object>> setProvider(@RequestBody Map<String, String> request) {
         String provider = request.get("provider");
+        if (provider == null || provider.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Provider is required",
+                    "success", false
+            ));
+        }
+        
+        // Validate provider value
+        if (!provider.equals("ollama") && !provider.equals("openai") && !provider.equals("custom")) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Invalid provider. Must be one of: ollama, openai, custom",
+                    "success", false
+            ));
+        }
+        
         configService.setActiveProvider(provider);
         log.info("Active provider changed to: {}", provider);
         return ResponseEntity.ok(Map.of(
                 "provider", configService.getActiveProvider(),
-                "message", "Provider updated successfully"
+                "message", "Provider updated successfully",
+                "success", true
         ));
     }
 

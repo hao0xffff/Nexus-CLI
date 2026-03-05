@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Play, AlertTriangle, ShieldAlert, Shield, Copy, Check, CheckCircle2, Loader2, XCircle } from 'lucide-react'
 import { useAI } from '../contexts/AIContext'
 
@@ -39,11 +39,32 @@ export default function CommandCard({ command }: CommandCardProps) {
   const [showWarning, setShowWarning] = useState(false)
   const [execStatus, setExecStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle')
   const [execOutput, setExecOutput] = useState<string>('')
+  
+  // Track timeouts for cleanup
+  const timeoutRefs = useRef<NodeJS.Timeout[]>([])
+  
+  // Clear all timeouts on unmount
+  useEffect(() => {
+    return () => {
+      timeoutRefs.current.forEach(clearTimeout)
+    }
+  }, [])
+  
+  // Helper to set timeout with cleanup tracking
+  const safeSetTimeout = useCallback((callback: () => void, delay: number) => {
+    const timeoutId = setTimeout(() => {
+      callback()
+      // Remove from refs after execution
+      timeoutRefs.current = timeoutRefs.current.filter(id => id !== timeoutId)
+    }, delay)
+    timeoutRefs.current.push(timeoutId)
+    return timeoutId
+  }, [])
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(command.command)
     setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    safeSetTimeout(() => setCopied(false), 2000)
   }
 
   const handleExecute = async () => {
@@ -67,14 +88,14 @@ export default function CommandCard({ command }: CommandCardProps) {
       setExecOutput(result.output || '')
       
       // Reset after 5 seconds
-      setTimeout(() => {
+      safeSetTimeout(() => {
         setExecStatus('idle')
         setExecOutput('')
       }, 5000)
     } catch (error) {
       setExecStatus('error')
       setExecOutput(error instanceof Error ? error.message : 'Execution failed')
-      setTimeout(() => {
+      safeSetTimeout(() => {
         setExecStatus('idle')
         setExecOutput('')
       }, 5000)
@@ -226,14 +247,14 @@ export default function CommandCard({ command }: CommandCardProps) {
                         const result = await executeCommand(command.command)
                         setExecStatus(result.status === 'success' ? 'success' : 'error')
                         setExecOutput(result.output || '')
-                        setTimeout(() => {
+                        safeSetTimeout(() => {
                           setExecStatus('idle')
                           setExecOutput('')
                         }, 5000)
                       } catch (error) {
                         setExecStatus('error')
                         setExecOutput(error instanceof Error ? error.message : 'Execution failed')
-                        setTimeout(() => {
+                        safeSetTimeout(() => {
                           setExecStatus('idle')
                           setExecOutput('')
                         }, 5000)

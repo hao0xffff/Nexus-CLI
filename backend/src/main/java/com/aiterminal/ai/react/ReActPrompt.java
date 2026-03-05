@@ -145,15 +145,29 @@ public class ReActPrompt {
      * Build a continuation message with command output.
      */
     public String buildContinuationMessage(String commandOutput, boolean success) {
-        String status = success ? "Command executed successfully" : "Command failed";
+        String status = success ? "Command executed successfully" : "Command failed or produced no output";
+        
+        // Ensure output is not null or empty
+        String output = (commandOutput == null || commandOutput.trim().isEmpty()) 
+            ? "(No output captured - command may still have executed successfully. Check the terminal.)"
+            : commandOutput;
+        
         return String.format("""
-            ## Command Output
-            %s
+            ## Command Execution Result
             
-            ## Status
+            ### Output:
+            ```
             %s
+            ```
             
-            Continue with the next step. Analyze the output and decide what to do next.
-            """, commandOutput.isEmpty() ? "(no output)" : commandOutput, status);
+            ### Status: %s
+            
+            Based on this output, continue with your task. Think about:
+            1. Did the command succeed?
+            2. What does the output tell you?
+            3. What should be the next step?
+            
+            Respond with THOUGHT, ACTION, and ACTION_INPUT.
+            """, output, status);
     }
 }

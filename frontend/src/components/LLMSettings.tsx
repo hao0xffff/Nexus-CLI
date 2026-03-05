@@ -125,7 +125,14 @@ interface LLMSettingsProps {
   onConfigChange?: () => void
 }
 
-const API_BASE = 'http://localhost:8080/api/llm'
+// Get backend URL dynamically (same pattern as other components)
+const getApiBase = async () => {
+  if (window.electronAPI) {
+    const backendUrl = await window.electronAPI.getBackendUrl()
+    return `${backendUrl}/api/llm`
+  }
+  return 'http://localhost:8080/api/llm'
+}
 
 export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSettingsProps) {
   const [loading, setLoading] = useState(true)
@@ -163,7 +170,8 @@ export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSett
   const loadConfig = async () => {
     try {
       setLoading(true)
-      const res = await fetch(`${API_BASE}/config`)
+      const apiBase = await getApiBase()
+      const res = await fetch(`${apiBase}/config`)
       const data: LLMConfig = await res.json()
       
       // Set active provider
@@ -214,7 +222,8 @@ export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSett
   const loadOllamaModels = async () => {
     try {
       setLoadingModels(true)
-      const res = await fetch(`${API_BASE}/ollama/models`)
+      const apiBase = await getApiBase()
+      const res = await fetch(`${apiBase}/ollama/models`)
       const data = await res.json()
       setOllamaModels(data.models || [])
       if (data.currentModel && !ollamaModel) {
@@ -255,22 +264,23 @@ export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSett
     setTestResult(null)
     
     try {
+      const apiBase = await getApiBase()
       let res
       if (selectedPreset === 'ollama') {
-        res = await fetch(`${API_BASE}/ollama/test`, {
+        res = await fetch(`${apiBase}/ollama/test`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ baseUrl: ollamaUrl })
         })
       } else if (selectedPreset === 'openai') {
-        res = await fetch(`${API_BASE}/openai/test`, {
+        res = await fetch(`${apiBase}/openai/test`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ baseUrl: openaiUrl, apiKey: openaiKey })
         })
       } else {
         // DeepSeek, Anthropic, Custom - all use OpenAI-compatible test
-        res = await fetch(`${API_BASE}/openai/test`, {
+        res = await fetch(`${apiBase}/openai/test`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ baseUrl: customUrl, apiKey: customKey })
@@ -295,16 +305,17 @@ export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSett
     setTestResult(null)
     
     try {
+      const apiBase = await getApiBase()
       // Save configuration based on selected preset
       if (selectedPreset === 'ollama') {
-        await fetch(`${API_BASE}/ollama`, {
+        await fetch(`${apiBase}/ollama`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ baseUrl: ollamaUrl, model: ollamaModel })
         })
         await setActiveProvider('ollama')
       } else if (selectedPreset === 'openai') {
-        await fetch(`${API_BASE}/openai`, {
+        await fetch(`${apiBase}/openai`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ baseUrl: openaiUrl, apiKey: openaiKey, model: openaiModel })
@@ -312,7 +323,7 @@ export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSett
         await setActiveProvider('openai')
       } else {
         // DeepSeek, Anthropic, Custom - save as custom
-        await fetch(`${API_BASE}/custom`, {
+        await fetch(`${apiBase}/custom`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
@@ -335,7 +346,8 @@ export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSett
   }
 
   const setActiveProvider = async (provider: string) => {
-    await fetch(`${API_BASE}/provider`, {
+    const apiBase = await getApiBase()
+    await fetch(`${apiBase}/provider`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider })

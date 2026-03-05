@@ -78,10 +78,11 @@ public class TerminalSessionFactory {
      * Get Windows build number for ConPTY compatibility check.
      */
     private String getWindowsBuildNumber() {
+        Process process = null;
         try {
             ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "ver");
             pb.redirectErrorStream(true);
-            Process process = pb.start();
+            process = pb.start();
             
             try (java.io.BufferedReader reader = new java.io.BufferedReader(
                     new java.io.InputStreamReader(process.getInputStream()))) {
@@ -104,6 +105,10 @@ public class TerminalSessionFactory {
             }
         } catch (Exception e) {
             log.debug("Failed to get Windows build number", e);
+        } finally {
+            if (process != null) {
+                process.destroyForcibly();
+            }
         }
         return null;
     }

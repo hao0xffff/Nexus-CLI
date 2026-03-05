@@ -30,6 +30,9 @@ public class ReActController {
 
     // Track active tasks for cancellation
     private final Map<String, Boolean> activeTasks = new ConcurrentHashMap<>();
+    
+    // Track emitter status to avoid sending after completion
+    private final Map<String, Boolean> emitterActive = new ConcurrentHashMap<>();
 
     /**
      * Start a ReAct task with Server-Sent Events for real-time updates.
@@ -38,24 +41,28 @@ public class ReActController {
     public SseEmitter executeTask(@RequestBody ReActRequest request) {
         log.info("Starting ReAct task: {} for session: {}", request.getTask(), request.getSessionId());
         
-        SseEmitter emitter = new SseEmitter(300000L); // 5 minute timeout
+        SseEmitter emitter = new SseEmitter(600000L); // 10 minute timeout for long tasks
         String taskId = request.getSessionId() + "-" + System.currentTimeMillis();
         
         activeTasks.put(taskId, true);
+        emitterActive.put(taskId, true);
 
         emitter.onCompletion(() -> {
             log.info("ReAct SSE completed for task: {}", taskId);
             activeTasks.remove(taskId);
+            emitterActive.remove(taskId); // Remove instead of put(false) to avoid memory leak
         });
         
         emitter.onTimeout(() -> {
             log.warn("ReAct SSE timeout for task: {}", taskId);
             activeTasks.remove(taskId);
+            emitterActive.remove(taskId);
         });
         
         emitter.onError(e -> {
             log.error("ReAct SSE error for task: {}", taskId, e);
             activeTasks.remove(taskId);
+            emitterActive.remove(taskId);
         });
 
         reactAgent.executeTask(request.getSessionId(), request.getTask(), step -> {
@@ -64,22 +71,43 @@ public class ReActController {
                 step.setStatus(ReActStatus.CANCELLED);
             }
             
+            // Only send if emitter is still active
+            if (!emitterActive.getOrDefault(taskId, false)) {
+                log.warn("SSE emitter already closed, skipping step: {}", step.getStepNumber());
+                return;
+            }
+            
             try {
                 ReActStepResponse response = ReActStepResponse.from(step);
                 String json = objectMapper.writeValueAsString(response);
-                emitter.send(SseEmitter.event()
-                        .name("step")
-                        .data(json));
                 
-                // Complete emitter on terminal states
-                if (step.getStatus() == ReActStatus.COMPLETED || 
-                    step.getStatus() == ReActStatus.ERROR ||
-                    step.getStatus() == ReActStatus.CANCELLED) {
-                    emitter.complete();
+                synchronized (emitter) {
+                    if (emitterActive.getOrDefault(taskId, false)) {
+                        emitter.send(SseEmitter.event()
+                                .name("step")
+                                .data(json));
+                        
+                        // Complete emitter on terminal states
+                        if (step.getStatus() == ReActStatus.COMPLETED || 
+                            step.getStatus() == ReActStatus.ERROR ||
+                            step.getStatus() == ReActStatus.CANCELLED) {
+                            emitterActive.remove(taskId);
+                            emitter.complete();
+                        }
+                    }
                 }
             } catch (IOException e) {
-                log.error("Failed to send SSE event", e);
-                emitter.completeWithError(e);
+                log.error("Failed to send SSE event: {}", e.getMessage());
+                emitterActive.remove(taskId);
+                try {
+                    emitter.completeWithError(e);
+                } catch (Exception ex) {
+                    // Ignore - emitter may already be closed
+                }
+            } catch (IllegalStateException e) {
+                // Emitter already completed
+                log.warn("SSE emitter state error: {}", e.getMessage());
+                emitterActive.remove(taskId);
             }
         });
 
@@ -111,7 +139,7 @@ public class ReActController {
     public Map<String, Object> getStatus() {
         return Map.of(
                 "available", true,
-                "maxSteps", 10,
+                "maxSteps", 30, // Match ReActAgent.MAX_STEPS
                 "features", Map.of(
                         "execute", true,
                         "observe", true,
