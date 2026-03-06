@@ -70,6 +70,14 @@ public interface ITerminalSession {
      * @param handler Consumer to receive output bytes
      */
     void onOutput(Consumer<byte[]> handler);
+    
+    /**
+     * Remove a previously registered output handler.
+     *
+     * @param handler The handler to remove
+     * @return true if handler was found and removed
+     */
+    boolean removeOutputHandler(Consumer<byte[]> handler);
 
     /**
      * Register close handler.

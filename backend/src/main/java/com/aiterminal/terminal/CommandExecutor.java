@@ -254,14 +254,21 @@ public class CommandExecutor {
         ProcessBuilder pb;
         
         if (systemInspector.isWindows()) {
-            // PowerShell with UTF-8 encoding
+            // PowerShell with comprehensive UTF-8 setup
+            // Set both input and output encoding, plus error stream
+            String psCommand = 
+                "$OutputEncoding = [Console]::OutputEncoding = [Console]::InputEncoding = " +
+                "[System.Text.Encoding]::UTF8; " +
+                "$PSDefaultParameterValues['*:Encoding'] = 'utf8'; " +
+                command;
+            
             pb = new ProcessBuilder(
-                "powershell.exe", "-NoProfile", "-NonInteractive", 
-                "-OutputFormat", "Text",
+                "powershell.exe", 
+                "-NoProfile", 
+                "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
                 "-Command",
-                // Ensure UTF-8 output
-                "$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " +
-                command
+                psCommand
             );
         } else {
             String shell = System.getenv("SHELL");
@@ -277,27 +284,61 @@ public class CommandExecutor {
             pb.directory(workDir);
         }
         
-        // Set UTF-8 environment
+        // Set UTF-8 environment for all platforms
         pb.environment().put("LANG", "en_US.UTF-8");
         pb.environment().put("LC_ALL", "en_US.UTF-8");
-        if (systemInspector.isWindows()) {
-            pb.environment().put("PYTHONIOENCODING", "utf-8");
-        }
+        pb.environment().put("PYTHONIOENCODING", "utf-8");
         
         return pb;
     }
+    
+    /**
+     * Get the appropriate charset for reading process output.
+     * On Windows with our UTF-8 setup, still try UTF-8 first but fallback to system default.
+     */
+    private Charset getOutputCharset() {
+        return StandardCharsets.UTF_8;
+    }
+    
+    /**
+     * Get fallback charset for Windows (system default, usually GBK for Chinese Windows).
+     */
+    private Charset getWindowsFallbackCharset() {
+        return Charset.forName(System.getProperty("sun.jnu.encoding", "GBK"));
+    }
 
     /**
-     * Read stream line by line with optional callback.
+     * Read stream with smart encoding detection.
+     * Try UTF-8 first, if garbled try system default encoding.
      */
     private void readStreamWithCallback(InputStream inputStream, StringBuilder output,
                                        Consumer<String> lineCallback) {
-        Charset charset = StandardCharsets.UTF_8;
-        
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(inputStream, charset))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
+        // First try to read all bytes, then decode with best charset
+        try {
+            byte[] bytes = inputStream.readAllBytes();
+            if (bytes.length == 0) {
+                return;
+            }
+            
+            // Try UTF-8 first
+            String content = new String(bytes, StandardCharsets.UTF_8);
+            
+            // Check if UTF-8 decoding produced garbled text (replacement characters)
+            // If there are many replacement chars or it looks garbled, try system encoding
+            if (systemInspector.isWindows() && containsGarbledChars(content)) {
+                Charset systemCharset = getWindowsFallbackCharset();
+                String fallbackContent = new String(bytes, systemCharset);
+                // Use fallback if it looks better (fewer replacement chars)
+                if (!containsGarbledChars(fallbackContent) || 
+                    countReplacementChars(fallbackContent) < countReplacementChars(content)) {
+                    content = fallbackContent;
+                    log.debug("Used fallback charset {} for better decoding", systemCharset);
+                }
+            }
+            
+            // Process line by line
+            String[] lines = content.split("\\r?\\n");
+            for (String line : lines) {
                 synchronized (output) {
                     if (output.length() > 0) {
                         output.append("\n");
@@ -313,9 +354,30 @@ public class CommandExecutor {
                 }
             }
         } catch (IOException e) {
-            // Stream closed, normal during process termination
             log.debug("Stream read ended: {}", e.getMessage());
         }
+    }
+    
+    /**
+     * Check if string contains garbled/replacement characters.
+     */
+    private boolean containsGarbledChars(String s) {
+        if (s == null) return false;
+        // Check for replacement character or sequences that indicate encoding issues
+        return s.contains("\uFFFD") || // Unicode replacement character
+               s.matches(".*[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F].*"); // Control characters
+    }
+    
+    /**
+     * Count replacement characters in string.
+     */
+    private int countReplacementChars(String s) {
+        if (s == null) return 0;
+        int count = 0;
+        for (char c : s.toCharArray()) {
+            if (c == '\uFFFD') count++;
+        }
+        return count;
     }
 
     /**

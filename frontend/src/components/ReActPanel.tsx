@@ -307,6 +307,9 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
             <p className="text-xs mt-2">
               The AI will automatically plan and execute commands
             </p>
+            <p className="text-xs mt-1 text-terminal-cyan/60">
+              Commands will be executed in the terminal on the left
+            </p>
           </div>
         )}
 

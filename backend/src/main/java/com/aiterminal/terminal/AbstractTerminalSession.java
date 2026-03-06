@@ -69,6 +69,11 @@ public abstract class AbstractTerminalSession implements ITerminalSession {
             outputHandlers.add(handler);
         }
     }
+    
+    @Override
+    public boolean removeOutputHandler(Consumer<byte[]> handler) {
+        return outputHandlers.remove(handler);
+    }
 
     @Override
     public void onClose(Runnable handler) {

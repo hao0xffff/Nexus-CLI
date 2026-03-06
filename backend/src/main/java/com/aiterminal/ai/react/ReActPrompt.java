@@ -55,35 +55,42 @@ public class ReActPrompt {
                ACTION: ERROR
                ACTION_INPUT: <explanation of why it failed>
             
-            ## Rules
-            1. Execute ONE command at a time, then wait for output
-            2. Always THINK before acting - explain your reasoning
-            3. Use OBSERVE after EXECUTE to check results
-            4. If a command fails, analyze the error and try a different approach
-            5. Never run dangerous commands (rm -rf /, format, etc.)
-            6. Use platform-appropriate commands for this system
-            7. Keep commands simple and safe
-            8. Maximum 10 steps per task to prevent infinite loops
+            ## STRICT RULES (MUST FOLLOW)
+            1. **ONE COMMAND per ACTION_INPUT** - never combine commands
+            2. Wait for output after each command before next step
+            3. Always THINK before acting
+            4. Maximum 30 steps per task
+            5. **NEVER use && or || to chain commands**
+            6. **NEVER use > or >> redirection** (use Set-Content instead)
+            7. **NEVER use Unix/bash commands on Windows**
+            8. Use ONLY the commands shown in the Platform Commands section
+            9. For multi-line content, use `n escape (not actual newlines)
             
-            ## Example
+            ## Example (Windows)
             
-            User: Create a folder called "test" and create a file inside it
+            User: Create a folder called "test" and create an HTML file inside it
             
-            THOUGHT: I need to first create the "test" folder, then create a file inside it. I'll start by creating the folder.
+            THOUGHT: I need to first create the "test" folder.
             ACTION: EXECUTE
             ACTION_INPUT: mkdir test
             
-            [After receiving output]
+            [After receiving: COMMAND STATUS: SUCCESS]
             
-            THOUGHT: The folder was created successfully. Now I need to create a file inside it.
+            THOUGHT: Folder created. Now I'll change to that directory.
             ACTION: EXECUTE
-            ACTION_INPUT: echo "Hello World" > test/hello.txt
+            ACTION_INPUT: cd test
             
-            [After receiving output]
+            [After receiving: COMMAND STATUS: SUCCESS]
             
-            THOUGHT: Both the folder and file have been created successfully.
+            THOUGHT: I'm in the test folder. Now I'll create an HTML file using Set-Content.
+            ACTION: EXECUTE
+            ACTION_INPUT: Set-Content -Path "hello.html" -Value "<!DOCTYPE html><html><body><h1>Hello</h1></body></html>"
+            
+            [After receiving: COMMAND STATUS: SUCCESS]
+            
+            THOUGHT: HTML file created successfully. Task complete.
             ACTION: COMPLETE
-            ACTION_INPUT: Created folder "test" and file "hello.txt" with content "Hello World"
+            ACTION_INPUT: Created folder "test" and HTML file "hello.html"
             """, osInfo, platformGuide);
     }
 
@@ -91,23 +98,43 @@ public class ReActPrompt {
      * Build platform-specific command examples.
      */
     private String buildPlatformGuide() {
+        // Get actual desktop path to include in prompt
+        String desktopPath = System.getProperty("user.home") + "\\Desktop";
+        String homePath = System.getProperty("user.home");
+        
         if (systemInspector.isWindows()) {
-            return """
-                Windows/PowerShell commands:
-                - Create folder: mkdir <name> or New-Item -ItemType Directory -Name <name>
-                - Create file: New-Item -ItemType File -Name <name> or echo "content" > file.txt
-                - List files: dir or Get-ChildItem or ls
-                - Read file: type <file> or Get-Content <file>
-                - Delete file: del <file> or Remove-Item <file>
-                - Delete folder: rmdir <folder> or Remove-Item -Recurse <folder>
-                - Current path: pwd or Get-Location
-                - Change directory: cd <path>
-                - Find files: Get-ChildItem -Recurse -Filter "*.txt"
-                - Process list: Get-Process or tasklist
-                - Environment var: $env:VARNAME
+            return String.format("""
+                ## Windows PowerShell Command Reference
                 
-                AVOID: /dev/null, grep, chmod, sudo, bash-specific syntax
-                """;
+                ### IMPORTANT PATHS:
+                - Desktop: %s
+                - Home: %s
+                
+                ### ONE COMMAND PER STEP - Execute commands ONE AT A TIME:
+                
+                | Task | Command |
+                |------|---------|
+                | Go to desktop | cd "%s" |
+                | Create folder | mkdir "foldername" |
+                | Create file with content | Set-Content -Path "file.html" -Value "content" |
+                | Create multi-line file | [System.IO.File]::WriteAllText("file.html", "line1`nline2") |
+                | List files | dir |
+                | Rename file | Rename-Item "old.txt" "new.txt" |
+                | Delete file | Remove-Item "file.txt" |
+                
+                ### FORBIDDEN - NEVER USE THESE:
+                - NEVER use && to chain commands (not valid PowerShell)
+                - NEVER use > or >> redirection (use Set-Content instead)
+                - NEVER use echo (use Set-Content or Write-Output)
+                - NEVER use ren (use Rename-Item)
+                - NEVER use Unix commands (grep, chmod, cat, touch)
+                - NEVER use here-strings (@" or @')
+                - NEVER combine multiple commands in one ACTION_INPUT
+                
+                ### CORRECT EXAMPLES:
+                - To create HTML file: Set-Content -Path "game.html" -Value "<html><body>Game</body></html>"
+                - Multi-line HTML: [System.IO.File]::WriteAllText("game.html", "<!DOCTYPE html>`n<html>`n<body>Game</body>`n</html>")
+                """, desktopPath, homePath, desktopPath);
         } else {
             return """
                 Unix/Linux/macOS commands:
@@ -145,29 +172,45 @@ public class ReActPrompt {
      * Build a continuation message with command output.
      */
     public String buildContinuationMessage(String commandOutput, boolean success) {
-        String status = success ? "Command executed successfully" : "Command failed or produced no output";
+        String status = success ? "SUCCESS (exit code 0)" : "FAILED (non-zero exit code)";
         
-        // Ensure output is not null or empty
-        String output = (commandOutput == null || commandOutput.trim().isEmpty()) 
-            ? "(No output captured - command may still have executed successfully. Check the terminal.)"
-            : commandOutput;
+        // Clean and format output
+        String output;
+        if (commandOutput == null || commandOutput.trim().isEmpty()) {
+            output = "(No output - command executed silently, which is normal for many commands like mkdir, cd, etc.)";
+        } else {
+            // Clean up any encoding issues or control characters
+            output = commandOutput
+                .replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]", "")  // Remove control chars except \n, \r, \t
+                .trim();
+            
+            // If output contains error indicators, highlight them
+            if (output.contains("不存在") || output.contains("not found") || 
+                output.contains("已存在") || output.contains("already exists") ||
+                output.contains("ResourceExists") || output.contains("Cannot find")) {
+                // These are informational, not necessarily errors
+                status = success ? "SUCCESS (with informational message)" : "FAILED";
+            }
+        }
         
         return String.format("""
             ## Command Execution Result
+            
+            ### Status: %s
             
             ### Output:
             ```
             %s
             ```
             
-            ### Status: %s
-            
             Based on this output, continue with your task. Think about:
-            1. Did the command succeed?
+            1. Did the command succeed? (Check the Status line above)
             2. What does the output tell you?
             3. What should be the next step?
             
+            IMPORTANT: If a folder or file "already exists", that means it's ALREADY CREATED - proceed to the next step!
+            
             Respond with THOUGHT, ACTION, and ACTION_INPUT.
-            """, output, status);
+            """, status, output);
     }
 }

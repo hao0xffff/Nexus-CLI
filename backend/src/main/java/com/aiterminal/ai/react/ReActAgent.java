@@ -3,10 +3,10 @@ package com.aiterminal.ai.react;
 import com.aiterminal.ai.CommandGuard;
 import com.aiterminal.ai.config.LLMConfigService;
 import com.aiterminal.ai.dto.ChatMessage;
-import com.aiterminal.terminal.CommandExecutor;
-import com.aiterminal.terminal.CommandExecutor.CommandResult;
 import com.aiterminal.terminal.ITerminalSession;
 import com.aiterminal.terminal.TerminalSessionManager;
+import com.aiterminal.terminal.sync.SyncCommandResult;
+import com.aiterminal.terminal.sync.TerminalSyncExecutor;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -32,8 +32,12 @@ import java.util.regex.Pattern;
  * ReAct Agent that can autonomously execute multi-step tasks.
  * Implements the ReAct (Reasoning + Acting) paradigm.
  * 
- * Uses CommandExecutor for clean command output capture instead of PTY terminal parsing.
- * Uses shared HttpClient and dedicated executor for optimal performance.
+ * KEY ARCHITECTURE:
+ * - Commands are executed THROUGH the PTY terminal (user sees everything)
+ * - Output is captured synchronously for LLM consumption
+ * - Terminal display and LLM context are ALWAYS synchronized
+ * 
+ * Uses TerminalSyncExecutor for synchronized command execution.
  */
 @Slf4j
 @Service
@@ -43,21 +47,21 @@ public class ReActAgent {
     private final CommandGuard commandGuard;
     private final LLMConfigService configService;
     private final TerminalSessionManager sessionManager;
-    private final CommandExecutor commandExecutor;
+    private final TerminalSyncExecutor syncExecutor;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
     private final ExecutorService reactExecutor;
 
     public ReActAgent(ReActPrompt reactPrompt, CommandGuard commandGuard,
                       LLMConfigService configService, TerminalSessionManager sessionManager,
-                      CommandExecutor commandExecutor, ObjectMapper objectMapper,
+                      TerminalSyncExecutor syncExecutor, ObjectMapper objectMapper,
                       HttpClient sharedHttpClient,
                       @Qualifier("reactExecutor") ExecutorService reactExecutor) {
         this.reactPrompt = reactPrompt;
         this.commandGuard = commandGuard;
         this.configService = configService;
         this.sessionManager = sessionManager;
-        this.commandExecutor = commandExecutor;
+        this.syncExecutor = syncExecutor;
         this.objectMapper = objectMapper;
         this.httpClient = sharedHttpClient;
         this.reactExecutor = reactExecutor;
@@ -91,9 +95,10 @@ public class ReActAgent {
 
     /**
      * Main ReAct execution loop.
+     * Commands are executed through PTY terminal for synchronized display.
      */
     private void runReActLoop(String sessionId, String task, Consumer<ReActStep> stepCallback) throws Exception {
-        // Verify terminal session exists (for display purposes)
+        // Verify terminal session exists
         ITerminalSession terminalSession = sessionManager.getSession(sessionId).orElse(null);
         if (terminalSession == null || !terminalSession.isActive()) {
             stepCallback.accept(ReActStep.error("Terminal session not found or inactive"));
@@ -101,8 +106,8 @@ public class ReActAgent {
         }
 
         String systemPrompt = reactPrompt.buildSystemPrompt();
-        // Use CommandExecutor's directory tracking instead of terminal session
-        String currentDir = commandExecutor.getSessionDirectory(sessionId);
+        // Get current directory from terminal session
+        String currentDir = terminalSession.getCurrentDirectory();
         
         List<ChatMessage> conversationHistory = new ArrayList<>();
         String userMessage = reactPrompt.buildTaskMessage(task, currentDir);
@@ -167,54 +172,51 @@ public class ReActAgent {
                         continue;
                     }
 
-                    // FIRST: Echo command to terminal so user sees it immediately
-                    try {
-                        terminalSession.write(command + "\r");
-                        Thread.sleep(100); // Brief pause to let terminal display the command
-                    } catch (Exception e) {
-                        log.warn("Failed to echo command to terminal: {}", e.getMessage());
-                    }
-                    
                     // Calculate smart timeout based on command type
-                    long timeout = commandExecutor.estimateTimeout(command);
-                    log.info("Executing command with {}ms timeout: {}", timeout, command);
+                    long timeout = syncExecutor.estimateTimeout(command);
+                    log.info("Executing command in terminal {}: {} (timeout: {}ms)", sessionId, command, timeout);
                     
                     // Update step to show command is executing
-                    stepResult.setOutput("Executing command...");
+                    stepResult.setOutput("Executing: " + command);
                     stepCallback.accept(stepResult);
                     
-                    // Execute command using CommandExecutor (clean output capture)
-                    CommandResult cmdResult = commandExecutor.execute(sessionId, command, timeout, 
-                        line -> {
-                            // Real-time output streaming (optional enhancement for future)
-                            log.debug("Command output line: {}", line);
-                        });
+                    // Execute command THROUGH the PTY terminal
+                    // This ensures:
+                    // 1. User sees the command and output in the terminal
+                    // 2. Output is captured for LLM consumption
+                    // 3. Terminal display and LLM context are synchronized
+                    SyncCommandResult cmdResult = syncExecutor.execute(sessionId, command, timeout, null);
                     
-                    // Update step with final result
-                    stepResult.setOutput(cmdResult.getCombinedOutput());
+                    // Log execution result
+                    log.info("Command completed: success={}, timedOut={}, outputLen={}", 
+                        cmdResult.isSuccess(), cmdResult.isTimedOut(), 
+                        cmdResult.getCleanOutput().length());
+                    
+                    // Update step with result - this displays in ReAct panel
+                    stepResult.setOutput(cmdResult.getCleanOutput());
                     
                     // Determine status based on result
                     if (cmdResult.isTimedOut()) {
-                        stepResult.setStatus(ReActStatus.RUNNING); // Continue despite timeout
+                        stepResult.setStatus(ReActStatus.RUNNING);
                         log.warn("Command timed out but continuing with partial output");
-                    } else if (cmdResult.isCancelled()) {
-                        stepResult.setStatus(ReActStatus.CANCELLED);
                     } else if (cmdResult.isSuccess()) {
                         stepResult.setStatus(ReActStatus.RUNNING);
                     } else {
-                        // Command failed but we can still continue
+                        // Command completed (may have errors but we continue)
                         stepResult.setStatus(ReActStatus.RUNNING);
                     }
                     
                     stepCallback.accept(stepResult);
 
-                    // Prepare continuation message with detailed output info
+                    // Prepare continuation message for LLM
                     String outputForLLM = buildOutputMessage(cmdResult);
                     userMessage = reactPrompt.buildContinuationMessage(outputForLLM, cmdResult.isSuccess());
                     conversationHistory.add(new ChatMessage("user", userMessage, System.currentTimeMillis()));
                     
-                    // Update current directory from CommandExecutor
-                    currentDir = commandExecutor.getSessionDirectory(sessionId);
+                    // Update current directory if available
+                    if (cmdResult.getWorkingDirectory() != null) {
+                        currentDir = cmdResult.getWorkingDirectory();
+                    }
                 }
                 case "OBSERVE" -> {
                     // OBSERVE is typically used after EXECUTE, continue loop
@@ -237,38 +239,69 @@ public class ReActAgent {
     /**
      * Build a detailed output message for LLM consumption.
      */
-    private String buildOutputMessage(CommandResult result) {
+    private String buildOutputMessage(SyncCommandResult result) {
         StringBuilder sb = new StringBuilder();
         
-        sb.append("Exit Code: ").append(result.getExitCode()).append("\n");
-        sb.append("Execution Time: ").append(result.getExecutionTimeMs()).append("ms\n");
-        
+        // Clear status line first - most important for LLM decision making
         if (result.isTimedOut()) {
-            sb.append("Status: TIMED OUT (partial output may be available)\n");
-        } else if (result.isCancelled()) {
-            sb.append("Status: CANCELLED\n");
+            sb.append("COMMAND STATUS: TIMED OUT\n");
         } else if (result.isSuccess()) {
-            sb.append("Status: SUCCESS\n");
+            sb.append("COMMAND STATUS: SUCCESS\n");
         } else {
-            sb.append("Status: FAILED (exit code ").append(result.getExitCode()).append(")\n");
+            sb.append("COMMAND STATUS: COMPLETED\n");
         }
         
-        sb.append("\n--- Output ---\n");
-        String output = result.getCombinedOutput();
-        if (output.isEmpty() || output.isBlank()) {
-            sb.append("(no output)\n");
+        sb.append("Execution Time: ").append(result.getExecutionTimeMs()).append("ms\n\n");
+        
+        String output = result.getCleanOutput();
+        
+        if (output == null || output.isEmpty() || output.isBlank() || 
+            output.equals("(command executed successfully, no output)") ||
+            output.equals("(no output)")) {
+            sb.append("OUTPUT: (no output - command completed silently, which is normal for mkdir, cd, etc.)\n");
         } else {
+            sb.append("OUTPUT:\n");
             // Limit output size to avoid context overflow
-            if (output.length() > 4000) {
-                sb.append(output.substring(0, 2000));
-                sb.append("\n... (output truncated, ").append(output.length() - 4000).append(" chars omitted) ...\n");
-                sb.append(output.substring(output.length() - 2000));
+            if (output.length() > 3000) {
+                sb.append(output.substring(0, 1500));
+                sb.append("\n... (").append(output.length() - 3000).append(" chars omitted) ...\n");
+                sb.append(output.substring(output.length() - 1500));
             } else {
                 sb.append(output);
             }
         }
         
+        // Add interpretation hints for common scenarios
+        if (output != null) {
+            if (output.contains("已存在") || output.contains("already exists") || output.contains("ResourceExists")) {
+                sb.append("\n\nNOTE: The target already exists - this is usually OK, proceed to next step.");
+            }
+            if (output.contains("不存在") || output.contains("not found") || output.contains("Cannot find")) {
+                sb.append("\n\nNOTE: Something was not found - check if the path is correct.");
+            }
+        }
+        
         return sb.toString();
+    }
+    
+    /**
+     * Clean output text for LLM consumption.
+     * Note: TerminalSyncExecutor already does most cleaning, this is for extra safety.
+     */
+    private String cleanOutputForLLM(String output) {
+        if (output == null) return "";
+        
+        return output
+            // Remove ANSI escape codes
+            .replaceAll("\\x1B\\[[0-9;]*[a-zA-Z]", "")
+            // Remove other control characters except newline, tab
+            .replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", "")
+            // Normalize line endings
+            .replaceAll("\\r\\n", "\n")
+            .replaceAll("\\r", "\n")
+            // Remove excessive blank lines
+            .replaceAll("\\n{3,}", "\n\n")
+            .trim();
     }
 
     /**
@@ -293,8 +326,14 @@ public class ReActAgent {
             Matcher inputMatcher = ACTION_INPUT_PATTERN.matcher(response);
             if (inputMatcher.find()) {
                 actionInput = inputMatcher.group(1).trim();
-                // Clean up any trailing whitespace or newlines
-                actionInput = actionInput.split("\\n")[0].trim();
+                // Extract only the first line - commands must be single line
+                String[] lines = actionInput.split("\\r?\\n");
+                actionInput = lines[0].trim();
+                
+                // Remove any markdown code block markers
+                actionInput = actionInput.replaceAll("^```[a-zA-Z]*\\s*", "");
+                actionInput = actionInput.replaceAll("```$", "");
+                actionInput = actionInput.trim();
             }
 
             if (action.isEmpty()) {
