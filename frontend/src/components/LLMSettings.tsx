@@ -126,13 +126,11 @@ interface LLMSettingsProps {
 }
 
 // Get backend URL dynamically (same pattern as other components)
-const getApiBase = async () => {
-  if (window.electronAPI) {
-    const backendUrl = await window.electronAPI.getBackendUrl()
-    return `${backendUrl}/api/llm`
-  }
-  return 'http://localhost:8080/api/llm'
-}
+// Import shared API utilities with cached backend URL
+import { getLLMApiBase } from '../utils/api'
+
+// Alias for backward compatibility
+const getApiBase = getLLMApiBase
 
 export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSettingsProps) {
   const [loading, setLoading] = useState(true)

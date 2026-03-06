@@ -1,25 +1,28 @@
 package com.aiterminal.terminal;
 
 import com.aiterminal.util.SystemInspector;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
+import java.util.concurrent.ExecutorService;
 
 /**
  * Factory for creating terminal sessions.
  * Automatically selects the best terminal implementation based on system capabilities:
  * - PTY (pty4j): Preferred, uses ConPTY on Windows 10 1809+, native PTY on Unix
  * - ProcessBuilder: Fallback when PTY is not available
+ * 
+ * Uses shared thread pool for optimal resource management.
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class TerminalSessionFactory {
 
     private final SystemInspector systemInspector;
+    private final ExecutorService ioExecutor;
 
     @Value("${terminal.buffer-size:50}")
     private int bufferSize;
@@ -28,6 +31,12 @@ public class TerminalSessionFactory {
     private boolean preferPty;
     
     private boolean ptyAvailable = false;
+    
+    public TerminalSessionFactory(SystemInspector systemInspector,
+                                  @Qualifier("terminalIoExecutor") ExecutorService ioExecutor) {
+        this.systemInspector = systemInspector;
+        this.ioExecutor = ioExecutor;
+    }
 
     @PostConstruct
     public void init() {
@@ -129,7 +138,7 @@ public class TerminalSessionFactory {
      * Create a PTY-based session (preferred).
      */
     private ITerminalSession createPtySession() {
-        PtySession session = new PtySession(systemInspector, bufferSize);
+        PtySession session = new PtySession(systemInspector, bufferSize, ioExecutor);
         log.debug("Created PTY session: {} (ConPTY: {})", 
                 session.getSessionId(), systemInspector.isWindows());
         return session;
@@ -139,7 +148,7 @@ public class TerminalSessionFactory {
      * Create a ProcessBuilder-based session (fallback).
      */
     private ITerminalSession createProcessBuilderSession() {
-        LocalSession session = new LocalSession(systemInspector, bufferSize);
+        LocalSession session = new LocalSession(systemInspector, bufferSize, ioExecutor);
         log.debug("Created ProcessBuilder session: {}", session.getSessionId());
         return session;
     }

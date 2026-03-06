@@ -12,21 +12,23 @@ import java.util.function.Consumer;
 /**
  * Local terminal session using ProcessBuilder.
  * Handles Windows encoding (GBK/UTF-8) and Unix PTY allocation.
+ * Uses shared thread pool for optimal resource usage.
  */
 @Slf4j
 public class LocalSession extends AbstractTerminalSession {
 
     private final SystemInspector systemInspector;
+    private final ExecutorService ioExecutor;  // Shared I/O executor
     private final String charset;
     
     private Process process;
     private OutputStream processInput;
-    private ExecutorService readerExecutor;
     private String currentDirectory;
 
-    public LocalSession(SystemInspector systemInspector, int bufferSize) {
+    public LocalSession(SystemInspector systemInspector, int bufferSize, ExecutorService ioExecutor) {
         super(SessionType.LOCAL, bufferSize);
         this.systemInspector = systemInspector;
+        this.ioExecutor = ioExecutor;
         this.charset = systemInspector.getDefaultEncoding();
         // Start terminal in user's home directory, not the Java process's working directory
         this.currentDirectory = systemInspector.getHomeDirectory();
@@ -49,12 +51,11 @@ public class LocalSession extends AbstractTerminalSession {
         processInput = process.getOutputStream();
         active = true;
 
-        // Start output reader threads
-        readerExecutor = Executors.newFixedThreadPool(2);
-        readerExecutor.submit(() -> readStream(process.getInputStream(), "stdout"));
-        readerExecutor.submit(() -> readStream(process.getErrorStream(), "stderr"));
+        // Start output reader threads using shared executor
+        ioExecutor.submit(() -> readStream(process.getInputStream(), "stdout"));
+        ioExecutor.submit(() -> readStream(process.getErrorStream(), "stderr"));
 
-        // Monitor process exit
+        // Monitor process exit using shared executor
         CompletableFuture.runAsync(() -> {
             try {
                 int exitCode = process.waitFor();
@@ -64,7 +65,7 @@ public class LocalSession extends AbstractTerminalSession {
             } finally {
                 close();
             }
-        });
+        }, ioExecutor);
 
         log.info("Local session {} started successfully", sessionId);
     }
@@ -231,10 +232,7 @@ public class LocalSession extends AbstractTerminalSession {
             }
         }
 
-        // Shutdown reader threads
-        if (readerExecutor != null) {
-            readerExecutor.shutdownNow();
-        }
+        // Note: We don't shutdown ioExecutor here as it's shared across sessions
 
         notifyClose();
         log.info("Local session {} closed", sessionId);

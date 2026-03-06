@@ -18,21 +18,24 @@ import java.util.concurrent.*;
  * Provides true PTY support on all platforms:
  * - Windows: ConPTY (Windows 10 1809+)
  * - macOS/Linux: Native PTY
+ * 
+ * Uses shared thread pool for optimal resource usage.
  */
 @Slf4j
 public class PtySession extends AbstractTerminalSession {
 
     private final SystemInspector systemInspector;
+    private final ExecutorService ioExecutor;  // Shared I/O executor
     private final String charset;
     
     private PtyProcess ptyProcess;
     private OutputStream ptyInput;
-    private ExecutorService readerExecutor;
     private String currentDirectory;
 
-    public PtySession(SystemInspector systemInspector, int bufferSize) {
+    public PtySession(SystemInspector systemInspector, int bufferSize, ExecutorService ioExecutor) {
         super(SessionType.LOCAL, bufferSize);
         this.systemInspector = systemInspector;
+        this.ioExecutor = ioExecutor;
         this.charset = systemInspector.getDefaultEncoding();
         // Start terminal in user's home directory, not the Java process's working directory
         this.currentDirectory = systemInspector.getHomeDirectory();
@@ -96,11 +99,10 @@ public class PtySession extends AbstractTerminalSession {
             ptyInput = ptyProcess.getOutputStream();
             active = true;
 
-            // Start output reader
-            readerExecutor = Executors.newSingleThreadExecutor();
-            readerExecutor.submit(this::readPtyOutput);
+            // Start output reader using shared executor
+            ioExecutor.submit(this::readPtyOutput);
 
-            // Monitor process exit
+            // Monitor process exit using shared executor
             CompletableFuture.runAsync(() -> {
                 try {
                     int exitCode = ptyProcess.waitFor();
@@ -110,7 +112,7 @@ public class PtySession extends AbstractTerminalSession {
                 } finally {
                     close();
                 }
-            });
+            }, ioExecutor);
 
             log.info("PTY session {} started successfully (ConPTY: {})", 
                     sessionId, systemInspector.isWindows());
@@ -239,11 +241,7 @@ public class PtySession extends AbstractTerminalSession {
             }
         }
 
-        // Shutdown reader thread
-        if (readerExecutor != null) {
-            readerExecutor.shutdownNow();
-        }
-
+        // Note: We don't shutdown ioExecutor here as it's shared across sessions
         notifyClose();
         log.info("PTY session {} closed", sessionId);
     }

@@ -162,11 +162,13 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
             if (wsLock != null) {
                 synchronized (wsLock) {
                     try {
+                        // Double check session is still open before sending
                         if (wsSession.isOpen()) {
                             sendMessageInternal(wsSession, Map.of("type", "closed"));
                         }
-                    } catch (IOException e) {
-                        log.debug("Error sending close notification", e);
+                    } catch (Exception e) {
+                        // Ignore - session may have been closed concurrently
+                        log.debug("Could not send close notification (session likely closed)", e);
                     }
                 }
             }

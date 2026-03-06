@@ -70,12 +70,11 @@ public class LLMConfigService {
     @Value("${spring.ai.openai.chat.options.model:gpt-4o}")
     private String defaultOpenaiModel;
 
-    public LLMConfigService(ObjectMapper objectMapper, ApplicationEventPublisher eventPublisher) {
+    public LLMConfigService(ObjectMapper objectMapper, ApplicationEventPublisher eventPublisher,
+                            HttpClient sharedHttpClient) {
         this.objectMapper = objectMapper.copy();
         this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.httpClient = sharedHttpClient;  // Use shared HttpClient
         this.secureStorage = SecureStorage.getInstance();
         this.eventPublisher = eventPublisher;
     }

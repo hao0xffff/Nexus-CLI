@@ -9,8 +9,8 @@ import com.aiterminal.terminal.ITerminalSession;
 import com.aiterminal.terminal.TerminalSessionManager;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -32,10 +33,10 @@ import java.util.regex.Pattern;
  * Implements the ReAct (Reasoning + Acting) paradigm.
  * 
  * Uses CommandExecutor for clean command output capture instead of PTY terminal parsing.
+ * Uses shared HttpClient and dedicated executor for optimal performance.
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class ReActAgent {
 
     private final ReActPrompt reactPrompt;
@@ -44,6 +45,23 @@ public class ReActAgent {
     private final TerminalSessionManager sessionManager;
     private final CommandExecutor commandExecutor;
     private final ObjectMapper objectMapper;
+    private final HttpClient httpClient;
+    private final ExecutorService reactExecutor;
+
+    public ReActAgent(ReActPrompt reactPrompt, CommandGuard commandGuard,
+                      LLMConfigService configService, TerminalSessionManager sessionManager,
+                      CommandExecutor commandExecutor, ObjectMapper objectMapper,
+                      HttpClient sharedHttpClient,
+                      @Qualifier("reactExecutor") ExecutorService reactExecutor) {
+        this.reactPrompt = reactPrompt;
+        this.commandGuard = commandGuard;
+        this.configService = configService;
+        this.sessionManager = sessionManager;
+        this.commandExecutor = commandExecutor;
+        this.objectMapper = objectMapper;
+        this.httpClient = sharedHttpClient;
+        this.reactExecutor = reactExecutor;
+    }
 
     private static final int MAX_STEPS = 30;  // For complex multi-step tasks
     private static final long DEFAULT_COMMAND_TIMEOUT_MS = 60000;  // Default 60 seconds
@@ -57,12 +75,8 @@ public class ReActAgent {
     private static final Pattern ACTION_INPUT_PATTERN = Pattern.compile(
             "ACTION_INPUT:\\s*(.+?)(?=THOUGHT:|$)", Pattern.DOTALL | Pattern.CASE_INSENSITIVE);
 
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(30))
-            .build();
-
     /**
-     * Execute a ReAct task asynchronously.
+     * Execute a ReAct task asynchronously using dedicated executor.
      */
     public void executeTask(String sessionId, String task, Consumer<ReActStep> stepCallback) {
         CompletableFuture.runAsync(() -> {
@@ -72,7 +86,7 @@ public class ReActAgent {
                 log.error("ReAct task failed", e);
                 stepCallback.accept(ReActStep.error("Task failed: " + e.getMessage()));
             }
-        });
+        }, reactExecutor);  // Use dedicated ReAct executor instead of ForkJoinPool
     }
 
     /**

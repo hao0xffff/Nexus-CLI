@@ -2,8 +2,8 @@ package com.aiterminal.terminal;
 
 import com.aiterminal.util.SystemInspector;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
@@ -16,19 +16,26 @@ import java.util.function.Consumer;
 /**
  * Robust command executor with streaming output support.
  * Executes commands in separate processes with proper timeout handling.
+ * Uses shared thread pool for optimal resource management.
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class CommandExecutor {
 
     private final SystemInspector systemInspector;
+    private final ExecutorService commandPool;  // Shared executor for command I/O
     
     // Track current directory per session
     private final ConcurrentHashMap<String, String> sessionDirectories = new ConcurrentHashMap<>();
     
     // Track running processes for cancellation
     private final ConcurrentHashMap<String, RunningCommand> runningCommands = new ConcurrentHashMap<>();
+    
+    public CommandExecutor(SystemInspector systemInspector,
+                          @Qualifier("commandExecutorPool") ExecutorService commandPool) {
+        this.systemInspector = systemInspector;
+        this.commandPool = commandPool;
+    }
 
     /**
      * Result of command execution.
@@ -135,7 +142,6 @@ public class CommandExecutor {
         
         log.info("Executing [{}] in {}: {}", executionId, workingDir, command);
         
-        ExecutorService executor = null;
         Process process = null;
         
         try {
@@ -151,16 +157,15 @@ public class CommandExecutor {
             StringBuilder stdoutBuilder = new StringBuilder();
             StringBuilder stderrBuilder = new StringBuilder();
             
-            // Read streams in separate threads
-            executor = Executors.newFixedThreadPool(2);
+            // Read streams using shared thread pool
             final Consumer<String> callback = outputCallback;
             
-            Future<Void> stdoutFuture = executor.submit(() -> {
+            Future<Void> stdoutFuture = commandPool.submit(() -> {
                 readStreamWithCallback(finalProcess.getInputStream(), stdoutBuilder, callback);
                 return null;
             });
             
-            Future<Void> stderrFuture = executor.submit(() -> {
+            Future<Void> stderrFuture = commandPool.submit(() -> {
                 readStreamWithCallback(finalProcess.getErrorStream(), stderrBuilder, null);
                 return null;
             });
@@ -227,11 +232,8 @@ public class CommandExecutor {
             return new CommandResult(-1, "", "Execution interrupted",
                 false, true, System.currentTimeMillis() - startTime);
         } finally {
-            // Always clean up resources
+            // Clean up resources (but don't shutdown shared pool)
             runningCommands.remove(executionId);
-            if (executor != null) {
-                executor.shutdownNow();
-            }
             if (process != null && process.isAlive()) {
                 process.destroyForcibly();
             }

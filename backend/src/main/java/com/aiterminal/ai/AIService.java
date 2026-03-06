@@ -7,7 +7,6 @@ import com.aiterminal.ai.dto.ChatResponse;
 import com.aiterminal.ai.dto.CommandCard;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -19,21 +18,33 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * AI service for chat interactions with Ollama and OpenAI.
+ * Uses shared HttpClient for connection pooling and async operations.
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AIService {
 
     private final ContextBuilder contextBuilder;
     private final CommandGuard commandGuard;
     private final ObjectMapper objectMapper;
     private final LLMConfigService configService;
+    private final HttpClient httpClient;  // Shared HttpClient from config
+
+    public AIService(ContextBuilder contextBuilder, CommandGuard commandGuard, 
+                     ObjectMapper objectMapper, LLMConfigService configService,
+                     HttpClient sharedHttpClient) {
+        this.contextBuilder = contextBuilder;
+        this.commandGuard = commandGuard;
+        this.objectMapper = objectMapper;
+        this.configService = configService;
+        this.httpClient = sharedHttpClient;
+    }
 
     // Multiple patterns to extract command JSON from AI responses
     // Pattern 1: ```command\n{"cmd": "...", "desc": "..."}\n```
@@ -51,10 +62,6 @@ public class AIService {
     private static final Pattern CODE_BLOCK_PATTERN = Pattern.compile(
             "```(?:bash|shell|sh|powershell|ps1|cmd|bat)?\\s*\\n([^`]+)\\n```"
     );
-
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(30))
-            .build();
 
     /**
      * Process a chat request and return AI response.

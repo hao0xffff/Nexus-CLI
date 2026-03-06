@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Play, Square, Bot, Loader2, CheckCircle2, XCircle, AlertTriangle, ChevronDown, ChevronRight, Terminal } from 'lucide-react'
 import { useTerminal } from '../contexts/TerminalContext'
+import { getBackendUrl } from '../utils/api'
 
 interface ReActStep {
   stepNumber: number
@@ -25,13 +26,6 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
   const abortControllerRef = useRef<AbortController | null>(null)
   const stepsEndRef = useRef<HTMLDivElement>(null)
   const isMountedRef = useRef(true)
-
-  const getBackendUrl = async () => {
-    if (window.electronAPI) {
-      return window.electronAPI.getBackendUrl()
-    }
-    return 'http://localhost:8080'
-  }
 
   // Track mounted state for cleanup
   useEffect(() => {

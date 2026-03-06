@@ -1,5 +1,6 @@
-import { createContext, useContext, useState, useCallback, ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from 'react'
 import { useTerminal } from './TerminalContext'
+import { getBackendUrl } from '../utils/api'
 
 interface ChatMessage {
   id: string
@@ -66,48 +67,42 @@ export function AIProvider({ children }: AIProviderProps) {
   const [commandExecutions, setCommandExecutions] = useState<CommandExecution[]>([])
   const { activeSessionId, sendInput, getRecentOutput } = useTerminal()
 
-  const getBackendUrl = useCallback(async () => {
-    if (window.electronAPI) {
-      return window.electronAPI.getBackendUrl()
-    }
-    return 'http://localhost:8080'
-  }, [])
-
   // Load current provider from backend config
   const refreshProvider = useCallback(async () => {
     try {
       const backendUrl = await getBackendUrl()
-      const response = await fetch(`${backendUrl}/api/llm/summary`)
-      if (response.ok) {
-        const data = await response.json()
-        const activeProvider = data.provider as 'ollama' | 'openai' | 'custom'
-        setProvider(activeProvider)
-        
-        // Build provider info
-        let displayName = activeProvider
-        if (activeProvider === 'custom') {
-          // Try to get custom name from config
-          const configRes = await fetch(`${backendUrl}/api/llm/config`)
-          if (configRes.ok) {
-            const config = await configRes.json()
-            displayName = config.custom?.name || 'Custom'
-          }
-        } else if (activeProvider === 'ollama') {
-          displayName = 'Ollama'
-        } else if (activeProvider === 'openai') {
-          displayName = 'OpenAI'
-        }
-        
-        setProviderInfo({
-          provider: activeProvider,
-          model: data.model || '',
-          name: displayName
-        })
+      // Fetch summary and config in parallel for better performance
+      const [summaryRes, configRes] = await Promise.all([
+        fetch(`${backendUrl}/api/llm/summary`),
+        fetch(`${backendUrl}/api/llm/config`)
+      ])
+      
+      if (!summaryRes.ok) return
+      const data = await summaryRes.json()
+      const activeProvider = data.provider as 'ollama' | 'openai' | 'custom'
+      setProvider(activeProvider)
+      
+      // Build provider info from parallel-fetched config
+      let displayName = activeProvider
+      if (activeProvider === 'custom' && configRes.ok) {
+        const config = await configRes.json()
+        displayName = config.custom?.name || 'Custom'
       }
+      
+      setProviderInfo({
+        provider: activeProvider,
+        model: data.model || '',
+        name: displayName
+      })
     } catch (error) {
-      console.error('Failed to refresh provider:', error)
+      console.error('Failed to load provider info:', error)
     }
-  }, [getBackendUrl])
+  }, [])
+
+  // Load provider info on mount
+  useEffect(() => {
+    refreshProvider()
+  }, [refreshProvider])
 
   const sendMessage = useCallback(async (message: string) => {
     if (!message.trim()) return

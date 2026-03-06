@@ -155,7 +155,10 @@ export default function Terminal({ sessionId }: TerminalProps) {
     if (fitAddonRef.current && terminalRef.current) {
       fitAddonRef.current.fit()
       const { cols, rows } = terminalRef.current
-      sendResize(sessionId, cols, rows)
+      // Only send resize if dimensions are valid (at least 10 cols)
+      if (cols >= 10 && rows >= 5) {
+        sendResize(sessionId, cols, rows)
+      }
     }
   }, [sessionId, sendResize])
 
