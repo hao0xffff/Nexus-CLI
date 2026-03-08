@@ -34,40 +34,54 @@ public class AIService {
     private final CommandGuard commandGuard;
     private final ObjectMapper objectMapper;
     private final LLMConfigService configService;
-    private final HttpClient httpClient;  // Shared HttpClient from config
+    private final HttpClient httpClient; // Shared HttpClient from config
+    private final ChatHistoryRepository chatHistoryRepository; // 历史记录管理
 
-    public AIService(ContextBuilder contextBuilder, CommandGuard commandGuard, 
-                     ObjectMapper objectMapper, LLMConfigService configService,
-                     HttpClient sharedHttpClient) {
+    public AIService(ContextBuilder contextBuilder, CommandGuard commandGuard,
+            ObjectMapper objectMapper, LLMConfigService configService,
+            HttpClient sharedHttpClient, ChatHistoryRepository chatHistoryRepository) {
         this.contextBuilder = contextBuilder;
         this.commandGuard = commandGuard;
         this.objectMapper = objectMapper;
         this.configService = configService;
         this.httpClient = sharedHttpClient;
+        this.chatHistoryRepository = chatHistoryRepository;
     }
 
     // Multiple patterns to extract command JSON from AI responses
     // Pattern 1: ```command\n{"cmd": "...", "desc": "..."}\n```
     private static final Pattern COMMAND_BLOCK_PATTERN = Pattern.compile(
             "```command\\s*\\n?\\s*\\{\\s*\"cmd\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"desc\"\\s*:\\s*\"([^\"]+)\"\\s*\\}\\s*\\n?```",
-            Pattern.MULTILINE | Pattern.DOTALL
-    );
-    
+            Pattern.MULTILINE | Pattern.DOTALL);
+
     // Pattern 2: `command:{"cmd":"...", "desc":"..."}`
     private static final Pattern INLINE_COMMAND_PATTERN = Pattern.compile(
-            "`command:\\{\\s*\"cmd\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"desc\"\\s*:\\s*\"([^\"]+)\"\\s*\\}`"
-    );
-    
+            "`command:\\{\\s*\"cmd\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"desc\"\\s*:\\s*\"([^\"]+)\"\\s*\\}`");
+
     // Pattern 3: Extract commands from regular code blocks (bash/shell/powershell)
     private static final Pattern CODE_BLOCK_PATTERN = Pattern.compile(
-            "```(?:bash|shell|sh|powershell|ps1|cmd|bat)?\\s*\\n([^`]+)\\n```"
-    );
+            "```(?:bash|shell|sh|powershell|ps1|cmd|bat)?\\s*\\n([^`]+)\\n```");
 
     /**
      * Process a chat request and return AI response.
      */
     public ChatResponse chat(ChatRequest request) {
         try {
+            // 获取 sessionId，如果前端未传则给予一个默认的全局会话ID以确保触发 Redis 存储
+            String sessionId = request.getSessionId();
+            if (sessionId == null || sessionId.trim().isEmpty()) {
+                sessionId = "default_session";
+            }
+
+            // 每次请求前，可选择是否合并前端传来的临时历史到 Redis (目前仅作记录，防止丢失，以 Redis 为主)
+            if (request.getHistory() != null && !request.getHistory().isEmpty()) {
+                // 如果需要强依赖前端：chatHistoryRepository.pushMessages(sessionId,
+                // request.getHistory());
+            }
+
+            // 从 Redis 拉取最近对话历史（减轻 token 压力）
+            List<ChatMessage> redisHistory = chatHistoryRepository.getRecentHistory(sessionId, 6);
+
             // Use provider from request, or fall back to config service
             AIProvider provider;
             if (request.getProvider() != null && !request.getProvider().isEmpty()) {
@@ -81,17 +95,26 @@ public class AIService {
             String userMessage = contextBuilder.buildUserMessage(
                     request.getMessage(),
                     request.getTerminalOutput(),
-                    request.getRecentLines() > 0 ? request.getRecentLines() : 50
-            );
+                    request.getRecentLines() > 0 ? request.getRecentLines() : 50);
+
+            // 将用户的提问即时保存入库
+            chatHistoryRepository.pushMessage(sessionId,
+                    ChatMessage.builder().role("user").content(request.getMessage())
+                            .timestamp(System.currentTimeMillis()).build());
 
             String response = switch (provider) {
-                case OLLAMA -> callOllama(systemPrompt, userMessage, request.getHistory());
-                case OPENAI -> callOpenAI(systemPrompt, userMessage, request.getHistory());
-                case CUSTOM -> callCustomAPI(systemPrompt, userMessage, request.getHistory());
+                case OLLAMA -> callOllama(systemPrompt, userMessage, redisHistory);
+                case OPENAI -> callOpenAI(systemPrompt, userMessage, redisHistory);
+                case CUSTOM -> callCustomAPI(systemPrompt, userMessage, redisHistory);
             };
 
             // Parse command cards from response
             List<CommandCard> commands = parseCommands(response);
+
+            // 将 AI 的回答也保存入库
+            chatHistoryRepository.pushMessage(sessionId,
+                    ChatMessage.builder().role("assistant").content(response).timestamp(System.currentTimeMillis())
+                            .build());
 
             return ChatResponse.builder()
                     .message(response)
@@ -115,10 +138,10 @@ public class AIService {
      */
     private String callOllama(String systemPrompt, String userMessage, List<ChatMessage> history) throws Exception {
         List<Map<String, String>> messages = new ArrayList<>();
-        
+
         // Add system prompt
         messages.add(Map.of("role", "system", "content", systemPrompt));
-        
+
         // Add history (limit to last 6 messages for speed)
         if (history != null) {
             int startIdx = Math.max(0, history.size() - 6);
@@ -127,18 +150,18 @@ public class AIService {
                 messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
             }
         }
-        
+
         // Add current user message
         messages.add(Map.of("role", "user", "content", userMessage));
 
         // Get configuration from config service
         String baseUrl = configService.getOllamaBaseUrl();
         String model = configService.getOllamaModel();
-        
+
         if (model == null || model.isEmpty()) {
             throw new RuntimeException("No Ollama model configured. Please select a model in settings.");
         }
-        
+
         log.debug("Ollama request: baseUrl={}, model={}", baseUrl, model);
 
         Map<String, Object> requestBody = Map.of(
@@ -146,13 +169,12 @@ public class AIService {
                 "messages", messages,
                 "stream", false,
                 "options", Map.of(
-                    "temperature", 0.3,      // Lower for faster, more deterministic responses
-                    "num_predict", 512       // Limit output tokens
-                )
-        );
+                        "temperature", 0.3, // Lower for faster, more deterministic responses
+                        "num_predict", 512 // Limit output tokens
+                ));
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
-        
+
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/api/chat"))
                 .header("Content-Type", "application/json")
@@ -161,7 +183,7 @@ public class AIService {
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        
+
         if (response.statusCode() != 200) {
             throw new RuntimeException("Ollama API error: " + response.statusCode() + " - " + response.body());
         }
@@ -178,16 +200,16 @@ public class AIService {
         String baseUrl = configService.getOpenAIBaseUrl();
         String apiKey = configService.getOpenAIApiKey();
         String model = configService.getOpenAIModel();
-        
+
         if (apiKey == null || apiKey.isEmpty() || apiKey.equals("your-api-key")) {
             throw new RuntimeException("OpenAI API key not configured. Please add your API key in settings.");
         }
 
         List<Map<String, String>> messages = new ArrayList<>();
-        
+
         // Add system prompt
         messages.add(Map.of("role", "system", "content", systemPrompt));
-        
+
         // Add history (limit to last 6 messages for speed)
         if (history != null) {
             int startIdx = Math.max(0, history.size() - 6);
@@ -196,21 +218,20 @@ public class AIService {
                 messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
             }
         }
-        
+
         // Add current user message
         messages.add(Map.of("role", "user", "content", userMessage));
-        
+
         log.debug("OpenAI request: baseUrl={}, model={}", baseUrl, model);
 
         Map<String, Object> requestBody = Map.of(
                 "model", model,
                 "messages", messages,
                 "temperature", 0.3,
-                "max_tokens", 800
-        );
+                "max_tokens", 800);
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
-        
+
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
@@ -220,7 +241,7 @@ public class AIService {
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        
+
         if (response.statusCode() != 200) {
             throw new RuntimeException("OpenAI API error: " + response.statusCode() + " - " + response.body());
         }
@@ -239,24 +260,24 @@ public class AIService {
     private String callCustomAPI(String systemPrompt, String userMessage, List<ChatMessage> history) throws Exception {
         // Get custom configuration from config service
         var customConfig = configService.getConfig().getCustom();
-        
+
         if (customConfig == null || customConfig.getBaseUrl() == null || customConfig.getBaseUrl().isEmpty()) {
             throw new RuntimeException("Custom API not configured. Please configure it in settings.");
         }
-        
+
         String baseUrl = customConfig.getBaseUrl();
         String apiKey = customConfig.getApiKey();
         String model = customConfig.getModel();
-        
+
         if (model == null || model.isEmpty()) {
             throw new RuntimeException("Custom API model not configured.");
         }
 
         List<Map<String, String>> messages = new ArrayList<>();
-        
+
         // Add system prompt
         messages.add(Map.of("role", "system", "content", systemPrompt));
-        
+
         // Add history (limit to last 6 messages for speed)
         if (history != null) {
             int startIdx = Math.max(0, history.size() - 6);
@@ -265,36 +286,35 @@ public class AIService {
                 messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
             }
         }
-        
+
         // Add current user message
         messages.add(Map.of("role", "user", "content", userMessage));
-        
+
         log.debug("Custom API request: baseUrl={}, model={}", baseUrl, model);
 
         Map<String, Object> requestBody = Map.of(
                 "model", model,
                 "messages", messages,
                 "temperature", 0.3,
-                "max_tokens", 800
-        );
+                "max_tokens", 800);
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
-        
+
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
                 .timeout(Duration.ofSeconds(60));
-        
+
         // Add API key header if configured
         if (apiKey != null && !apiKey.isEmpty()) {
             requestBuilder.header("Authorization", "Bearer " + apiKey);
         }
-        
+
         HttpRequest request = requestBuilder.build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        
+
         if (response.statusCode() != 200) {
             throw new RuntimeException("Custom API error: " + response.statusCode() + " - " + response.body());
         }
@@ -347,14 +367,15 @@ public class AIService {
                 for (String line : lines) {
                     String trimmedLine = line.trim();
                     // Skip empty lines, comments, and non-command content
-                    if (trimmedLine.isEmpty() || 
-                        trimmedLine.startsWith("#") || 
-                        trimmedLine.startsWith("//") ||
-                        trimmedLine.startsWith("REM") ||
-                        trimmedLine.length() > 200) {
+                    if (trimmedLine.isEmpty() ||
+                            trimmedLine.startsWith("#") ||
+                            trimmedLine.startsWith("//") ||
+                            trimmedLine.startsWith("REM") ||
+                            trimmedLine.length() > 200) {
                         continue;
                     }
-                    // Only include lines that look like commands (start with common command patterns)
+                    // Only include lines that look like commands (start with common command
+                    // patterns)
                     if (looksLikeCommand(trimmedLine) && !seenCommands.contains(trimmedLine)) {
                         commands.add(createCommandCard(trimmedLine, "Execute this command"));
                         seenCommands.add(trimmedLine);
@@ -386,55 +407,55 @@ public class AIService {
     private boolean looksLikeCommand(String line) {
         // Skip obvious non-commands
         if (line.contains("pshell") || // Invalid command
-            line.contains("/dev/null") || // Unix-only, skip if mixed
-            line.startsWith("$") || // Variable assignment/reference
-            line.startsWith("@") || // PowerShell splatting or other
-            line.contains("->") || // Code syntax
-            line.contains("=>") || // Code syntax
-            line.contains("function ") || // Function definition
-            line.contains("def ") || // Python definition
-            line.matches("^[a-zA-Z_][a-zA-Z0-9_]*\\s*=.*") // Assignment
+                line.contains("/dev/null") || // Unix-only, skip if mixed
+                line.startsWith("$") || // Variable assignment/reference
+                line.startsWith("@") || // PowerShell splatting or other
+                line.contains("->") || // Code syntax
+                line.contains("=>") || // Code syntax
+                line.contains("function ") || // Function definition
+                line.contains("def ") || // Python definition
+                line.matches("^[a-zA-Z_][a-zA-Z0-9_]*\\s*=.*") // Assignment
         ) {
             return false;
         }
-        
+
         // Common command prefixes (Unix and Windows)
         String[] commonPrefixes = {
-            // Unix common
-            "ls", "cd", "pwd", "cat", "echo", "grep", "find", "mkdir", "rm", "cp", "mv",
-            "touch", "head", "tail", "less", "more", "wc", "sort", "uniq", "awk", "sed",
-            "tar", "zip", "unzip", "gzip", "gunzip",
-            "ps", "kill", "pkill", "top", "htop", "df", "du", "free",
-            "chmod", "chown", "chgrp", "sudo", "su",
-            "ssh", "scp", "rsync", "curl", "wget",
-            "systemctl", "service", "journalctl",
-            "apt", "apt-get", "yum", "dnf", "brew", "pacman",
-            // Windows/PowerShell common
-            "dir", "type", "copy", "move", "del", "ren", "md", "rd",
-            "ipconfig", "netstat", "ping", "tracert", "nslookup",
-            "tasklist", "taskkill", "net", "sc", "reg", "wmic",
-            "Get-", "Set-", "New-", "Remove-", "Start-", "Stop-", "Restart-",
-            "Select-", "Where-", "ForEach-", "Out-", "Write-", "Read-",
-            "Invoke-", "Test-", "Add-", "Clear-", "Copy-", "Move-",
-            "Get-ChildItem", "Get-Content", "Get-Process", "Get-Service",
-            "Get-Location", "Get-Item", "Get-Help", "Get-Command",
-            // Dev tools
-            "git", "npm", "yarn", "pnpm", "node", "npx",
-            "python", "python3", "pip", "pip3", "conda",
-            "java", "javac", "mvn", "gradle",
-            "docker", "docker-compose", "kubectl", "helm",
-            "code", "vim", "nano", "emacs",
-            // Relative paths
-            "./", ".\\"
+                // Unix common
+                "ls", "cd", "pwd", "cat", "echo", "grep", "find", "mkdir", "rm", "cp", "mv",
+                "touch", "head", "tail", "less", "more", "wc", "sort", "uniq", "awk", "sed",
+                "tar", "zip", "unzip", "gzip", "gunzip",
+                "ps", "kill", "pkill", "top", "htop", "df", "du", "free",
+                "chmod", "chown", "chgrp", "sudo", "su",
+                "ssh", "scp", "rsync", "curl", "wget",
+                "systemctl", "service", "journalctl",
+                "apt", "apt-get", "yum", "dnf", "brew", "pacman",
+                // Windows/PowerShell common
+                "dir", "type", "copy", "move", "del", "ren", "md", "rd",
+                "ipconfig", "netstat", "ping", "tracert", "nslookup",
+                "tasklist", "taskkill", "net", "sc", "reg", "wmic",
+                "Get-", "Set-", "New-", "Remove-", "Start-", "Stop-", "Restart-",
+                "Select-", "Where-", "ForEach-", "Out-", "Write-", "Read-",
+                "Invoke-", "Test-", "Add-", "Clear-", "Copy-", "Move-",
+                "Get-ChildItem", "Get-Content", "Get-Process", "Get-Service",
+                "Get-Location", "Get-Item", "Get-Help", "Get-Command",
+                // Dev tools
+                "git", "npm", "yarn", "pnpm", "node", "npx",
+                "python", "python3", "pip", "pip3", "conda",
+                "java", "javac", "mvn", "gradle",
+                "docker", "docker-compose", "kubectl", "helm",
+                "code", "vim", "nano", "emacs",
+                // Relative paths
+                "./", ".\\"
         };
-        
+
         String lowerLine = line.toLowerCase();
         for (String prefix : commonPrefixes) {
             if (lowerLine.startsWith(prefix.toLowerCase())) {
                 return true;
             }
         }
-        
+
         // Check for commands with full paths
         return (line.length() > 2 && line.charAt(1) == ':'); // Windows drive path like C:\
     }
