@@ -22,7 +22,7 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
   const [isRunning, setIsRunning] = useState(false)
   const [steps, setSteps] = useState<ReActStep[]>([])
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
-  const { activeSessionId, activeBackendSessionId } = useTerminal()
+  const { activeBackendSessionId } = useTerminal()
   const abortControllerRef = useRef<AbortController | null>(null)
   const stepsEndRef = useRef<HTMLDivElement>(null)
   const isMountedRef = useRef(true)
@@ -167,12 +167,6 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
   const cancelTask = useCallback(async () => {
     if (!activeBackendSessionId) return
 
-    // Abort the fetch stream
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort()
-      abortControllerRef.current = null
-    }
-
     try {
       const backendUrl = await getBackendUrl()
       await fetch(`${backendUrl}/api/react/cancel/${activeBackendSessionId}`, {
@@ -181,8 +175,26 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
     } catch (error) {
       console.error('Failed to cancel task:', error)
     }
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
     
     if (isMountedRef.current) {
+      setSteps(prev => {
+        const last = prev[prev.length - 1]
+        if (last?.status === 'CANCELLED') return prev
+        return [...prev, {
+          stepNumber: -1,
+          thought: 'Task cancelled by user',
+          action: 'CANCEL',
+          actionInput: 'Task cancellation requested',
+          output: 'Task cancelled by user',
+          status: 'CANCELLED',
+          timestamp: Date.now(),
+        }]
+      })
       setIsRunning(false)
     }
   }, [activeBackendSessionId])
@@ -210,6 +222,8 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
       case 'RUNNING':
       case 'STARTED':
         return <Loader2 size={16} className="text-terminal-blue animate-spin" />
+      case 'CANCELLED':
+        return <AlertTriangle size={16} className="text-terminal-yellow" />
       default:
         return <Bot size={16} className="text-terminal-fg/60" />
     }
@@ -226,6 +240,8 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
       case 'RUNNING':
       case 'STARTED':
         return 'border-terminal-blue/30 bg-terminal-blue/5'
+      case 'CANCELLED':
+        return 'border-terminal-yellow/30 bg-terminal-yellow/5'
       default:
         return 'border-[#414868] bg-[#1a1b26]'
     }

@@ -125,6 +125,8 @@ public class ReActController {
         activeTasks.keySet().stream()
                 .filter(k -> k.startsWith(sessionId))
                 .forEach(k -> activeTasks.put(k, false));
+
+        reactAgent.cancelTask(sessionId);
         
         return Map.of(
                 "success", true,

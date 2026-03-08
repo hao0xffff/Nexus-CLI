@@ -44,4 +44,16 @@ public class ReActStep {
                 .timestamp(System.currentTimeMillis())
                 .build();
     }
+
+    public static ReActStep cancelled(String message) {
+        return ReActStep.builder()
+                .stepNumber(-1)
+                .thought(message)
+                .action("CANCEL")
+                .actionInput(message)
+                .output(message)
+                .status(ReActStatus.CANCELLED)
+                .timestamp(System.currentTimeMillis())
+                .build();
+    }
 }

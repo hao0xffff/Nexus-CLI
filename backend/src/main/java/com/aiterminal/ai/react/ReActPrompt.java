@@ -1,6 +1,6 @@
 package com.aiterminal.ai.react;
 
-import com.aiterminal.util.SystemInspector;
+import com.aiterminal.terminal.profile.TerminalProfileResolver;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -12,14 +12,14 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class ReActPrompt {
 
-    private final SystemInspector systemInspector;
+    private final TerminalProfileResolver terminalProfileResolver;
 
     /**
      * Main ReAct system prompt template.
      */
     public String buildSystemPrompt() {
-        String osInfo = systemInspector.buildSystemContext();
-        String platformGuide = buildPlatformGuide();
+        String osInfo = terminalProfileResolver.buildSystemContext();
+        String platformGuide = terminalProfileResolver.buildReActCommandGuide();
         
         return String.format("""
             You are an autonomous AI agent operating in a terminal. You can THINK, PLAN, and ACT to accomplish user tasks.
@@ -92,65 +92,6 @@ public class ReActPrompt {
             ACTION: COMPLETE
             ACTION_INPUT: Created folder "test" and HTML file "hello.html"
             """, osInfo, platformGuide);
-    }
-
-    /**
-     * Build platform-specific command examples.
-     */
-    private String buildPlatformGuide() {
-        // Get actual desktop path to include in prompt
-        String desktopPath = System.getProperty("user.home") + "\\Desktop";
-        String homePath = System.getProperty("user.home");
-        
-        if (systemInspector.isWindows()) {
-            return String.format("""
-                ## Windows PowerShell Command Reference
-                
-                ### IMPORTANT PATHS:
-                - Desktop: %s
-                - Home: %s
-                
-                ### ONE COMMAND PER STEP - Execute commands ONE AT A TIME:
-                
-                | Task | Command |
-                |------|---------|
-                | Go to desktop | cd "%s" |
-                | Create folder | mkdir "foldername" |
-                | Create file with content | Set-Content -Path "file.html" -Value "content" |
-                | Create multi-line file | [System.IO.File]::WriteAllText("file.html", "line1`nline2") |
-                | List files | dir |
-                | Rename file | Rename-Item "old.txt" "new.txt" |
-                | Delete file | Remove-Item "file.txt" |
-                
-                ### FORBIDDEN - NEVER USE THESE:
-                - NEVER use && to chain commands (not valid PowerShell)
-                - NEVER use > or >> redirection (use Set-Content instead)
-                - NEVER use echo (use Set-Content or Write-Output)
-                - NEVER use ren (use Rename-Item)
-                - NEVER use Unix commands (grep, chmod, cat, touch)
-                - NEVER use here-strings (@" or @')
-                - NEVER combine multiple commands in one ACTION_INPUT
-                
-                ### CORRECT EXAMPLES:
-                - To create HTML file: Set-Content -Path "game.html" -Value "<html><body>Game</body></html>"
-                - Multi-line HTML: [System.IO.File]::WriteAllText("game.html", "<!DOCTYPE html>`n<html>`n<body>Game</body>`n</html>")
-                """, desktopPath, homePath, desktopPath);
-        } else {
-            return """
-                Unix/Linux/macOS commands:
-                - Create folder: mkdir <name>
-                - Create file: touch <name> or echo "content" > file.txt
-                - List files: ls -la
-                - Read file: cat <file>
-                - Delete file: rm <file>
-                - Delete folder: rm -r <folder>
-                - Current path: pwd
-                - Change directory: cd <path>
-                - Find files: find . -name "*.txt"
-                - Process list: ps aux
-                - Environment var: echo $VARNAME
-                """;
-        }
     }
 
     /**

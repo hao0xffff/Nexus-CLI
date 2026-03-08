@@ -22,8 +22,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -51,6 +53,8 @@ public class ReActAgent {
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
     private final ExecutorService reactExecutor;
+    private final Map<String, CompletableFuture<Void>> runningTasks = new ConcurrentHashMap<>();
+    private final Map<String, AtomicBoolean> cancelFlags = new ConcurrentHashMap<>();
 
     public ReActAgent(ReActPrompt reactPrompt, CommandGuard commandGuard,
                       LLMConfigService configService, TerminalSessionManager sessionManager,
@@ -83,14 +87,42 @@ public class ReActAgent {
      * Execute a ReAct task asynchronously using dedicated executor.
      */
     public void executeTask(String sessionId, String task, Consumer<ReActStep> stepCallback) {
-        CompletableFuture.runAsync(() -> {
+        AtomicBoolean cancelFlag = new AtomicBoolean(false);
+        cancelFlags.put(sessionId, cancelFlag);
+
+        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
             try {
                 runReActLoop(sessionId, task, stepCallback);
+            } catch (java.util.concurrent.CancellationException e) {
+                stepCallback.accept(ReActStep.cancelled("Task cancelled by user"));
             } catch (Exception e) {
                 log.error("ReAct task failed", e);
                 stepCallback.accept(ReActStep.error("Task failed: " + e.getMessage()));
             }
-        }, reactExecutor);  // Use dedicated ReAct executor instead of ForkJoinPool
+        }, reactExecutor);
+
+        runningTasks.compute(sessionId, (key, previous) -> {
+            if (previous != null && !previous.isDone()) {
+                previous.cancel(true);
+            }
+            return future;
+        });
+
+        future.whenComplete((unused, throwable) -> {
+            runningTasks.computeIfPresent(sessionId, (key, current) -> current == future ? null : current);
+            cancelFlags.computeIfPresent(sessionId, (key, current) -> current == cancelFlag ? null : current);
+        });
+    }
+
+    public void cancelTask(String sessionId) {
+        AtomicBoolean flag = cancelFlags.get(sessionId);
+        if (flag != null) {
+            flag.set(true);
+        }
+        CompletableFuture<Void> task = runningTasks.get(sessionId);
+        if (task != null && !task.isDone()) {
+            task.cancel(true);
+        }
     }
 
     /**
@@ -98,6 +130,10 @@ public class ReActAgent {
      * Commands are executed through PTY terminal for synchronized display.
      */
     private void runReActLoop(String sessionId, String task, Consumer<ReActStep> stepCallback) throws Exception {
+        if (isCancelled(sessionId)) {
+            stepCallback.accept(ReActStep.cancelled("Task cancelled by user"));
+            return;
+        }
         // Verify terminal session exists
         ITerminalSession terminalSession = sessionManager.getSession(sessionId).orElse(null);
         if (terminalSession == null || !terminalSession.isActive()) {
@@ -115,10 +151,18 @@ public class ReActAgent {
         stepCallback.accept(ReActStep.started(task));
 
         for (int step = 0; step < MAX_STEPS; step++) {
+            if (isCancelled(sessionId)) {
+                stepCallback.accept(ReActStep.cancelled("Task cancelled by user"));
+                return;
+            }
             log.info("ReAct step {} for task: {}", step + 1, task);
             
             // Call LLM
             String llmResponse = callLLM(systemPrompt, userMessage, conversationHistory);
+            if (isCancelled(sessionId)) {
+                stepCallback.accept(ReActStep.cancelled("Task cancelled by user"));
+                return;
+            }
             
             // Parse response
             ReActParsedResponse parsed = parseResponse(llmResponse);
@@ -157,7 +201,19 @@ public class ReActAgent {
                     return;
                 }
                 case "EXECUTE" -> {
+                    if (isCancelled(sessionId)) {
+                        stepCallback.accept(ReActStep.cancelled("Task cancelled by user"));
+                        return;
+                    }
                     String command = parsed.actionInput.trim();
+                    if (command.isBlank()) {
+                        stepResult.setStatus(ReActStatus.RUNNING);
+                        stepResult.setOutput("No executable command parsed. Please provide one concrete single-line command.");
+                        stepCallback.accept(stepResult);
+                        userMessage = "Your previous ACTION_INPUT did not contain a valid single-line command. Provide exactly one runnable command.";
+                        conversationHistory.add(new ChatMessage("user", userMessage, System.currentTimeMillis()));
+                        continue;
+                    }
                     
                     // Validate command safety
                     CommandGuard.ValidationResult validation = commandGuard.validate(command);
@@ -186,6 +242,10 @@ public class ReActAgent {
                     // 2. Output is captured for LLM consumption
                     // 3. Terminal display and LLM context are synchronized
                     SyncCommandResult cmdResult = syncExecutor.execute(sessionId, command, timeout, null);
+                    if (isCancelled(sessionId)) {
+                        stepCallback.accept(ReActStep.cancelled("Task cancelled by user"));
+                        return;
+                    }
                     
                     // Log execution result
                     log.info("Command completed: success={}, timedOut={}, outputLen={}", 
@@ -234,6 +294,11 @@ public class ReActAgent {
 
         // Max steps reached
         stepCallback.accept(ReActStep.error("Maximum steps (" + MAX_STEPS + ") reached. Task may be incomplete."));
+    }
+
+    private boolean isCancelled(String sessionId) {
+        AtomicBoolean flag = cancelFlags.get(sessionId);
+        return Thread.currentThread().isInterrupted() || (flag != null && flag.get());
     }
     
     /**
@@ -326,14 +391,18 @@ public class ReActAgent {
             Matcher inputMatcher = ACTION_INPUT_PATTERN.matcher(response);
             if (inputMatcher.find()) {
                 actionInput = inputMatcher.group(1).trim();
-                // Extract only the first line - commands must be single line
+                actionInput = actionInput.replaceAll("```[a-zA-Z]*", "")
+                                         .replace("```", "")
+                                         .trim();
+
                 String[] lines = actionInput.split("\\r?\\n");
-                actionInput = lines[0].trim();
-                
-                // Remove any markdown code block markers
-                actionInput = actionInput.replaceAll("^```[a-zA-Z]*\\s*", "");
-                actionInput = actionInput.replaceAll("```$", "");
-                actionInput = actionInput.trim();
+                for (String line : lines) {
+                    String trimmed = line.trim();
+                    if (!trimmed.isEmpty()) {
+                        actionInput = trimmed;
+                        break;
+                    }
+                }
             }
 
             if (action.isEmpty()) {

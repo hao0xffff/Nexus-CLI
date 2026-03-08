@@ -1,7 +1,8 @@
 package com.aiterminal.ai;
 
 import com.aiterminal.terminal.ITerminalSession;
-import com.aiterminal.util.SystemInspector;
+import com.aiterminal.terminal.profile.TerminalProfile;
+import com.aiterminal.terminal.profile.TerminalProfileResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -17,7 +18,7 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class ContextBuilder {
 
-    private final SystemInspector systemInspector;
+    private final TerminalProfileResolver terminalProfileResolver;
 
     // Pattern to strip ANSI escape sequences
     private static final Pattern ANSI_PATTERN = Pattern.compile(
@@ -51,22 +52,9 @@ public class ContextBuilder {
      * Build the system prompt with current system information.
      */
     public String buildSystemPrompt() {
-        String systemContext = systemInspector.buildSystemContext();
-        String platformGuide = buildPlatformGuide();
+        String systemContext = terminalProfileResolver.buildSystemContext();
+        String platformGuide = terminalProfileResolver.buildCompactCommandGuide();
         return String.format(SYSTEM_PROMPT_TEMPLATE, systemContext, platformGuide);
-    }
-
-    /**
-     * Build compact platform-specific command guide.
-     */
-    private String buildPlatformGuide() {
-        if (systemInspector.isWindows()) {
-            return "PowerShell: dir/ls, cd, type/cat, Get-Process. Avoid: /dev/null, grep, chmod, sudo.";
-        } else if (systemInspector.getOsType() == SystemInspector.OSType.MACOS) {
-            return "macOS: ls, cd, cat, grep, ps, kill.";
-        } else {
-            return "Linux: ls, cd, cat, grep, ps, kill.";
-        }
     }
 
     /**
@@ -130,13 +118,14 @@ public class ContextBuilder {
      * Build a minimal context for quick queries.
      */
     public String buildMinimalContext(String userQuery) {
+        TerminalProfile profile = terminalProfileResolver.resolveProfile();
         return String.format("""
             System: %s %s, Shell: %s
             Query: %s
             """,
-            systemInspector.getOsType(),
-            systemInspector.getOsVersion(),
-            systemInspector.getShellType(),
+            profile.getOsType(),
+            profile.getOsVersion(),
+            profile.getShellType(),
             userQuery
         );
     }

@@ -11,8 +11,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -83,7 +85,11 @@ public class TerminalSyncExecutor {
         long startTime = System.currentTimeMillis();
         
         StringBuilder rawOutput = new StringBuilder();
+        String marker = generateEndMarker();
+        String commandProbe = command == null ? "" : command.substring(0, Math.min(20, command.length()));
         AtomicBoolean promptFound = new AtomicBoolean(false);
+        AtomicBoolean markerFound = new AtomicBoolean(false);
+        AtomicInteger exitCode = new AtomicInteger(Integer.MIN_VALUE);
         AtomicLong lastOutputTime = new AtomicLong(System.currentTimeMillis());
         AtomicBoolean commandEchoed = new AtomicBoolean(false);
         CountDownLatch completionLatch = new CountDownLatch(1);
@@ -106,9 +112,17 @@ public class TerminalSyncExecutor {
             }
             
             String currentOutput = rawOutput.toString();
+            String outputWithoutAnsi = ANSI_PATTERN.matcher(currentOutput).replaceAll("");
+            Integer parsedExitCode = extractExitCode(outputWithoutAnsi, marker);
+            if (parsedExitCode != null) {
+                markerFound.set(true);
+                exitCode.set(parsedExitCode);
+                completionLatch.countDown();
+                return;
+            }
             
             // First, check if command has been echoed (command is being processed)
-            if (!commandEchoed.get() && currentOutput.contains(command.substring(0, Math.min(20, command.length())))) {
+            if (!commandEchoed.get() && !commandProbe.isBlank() && currentOutput.contains(commandProbe)) {
                 commandEchoed.set(true);
             }
             
@@ -139,7 +153,7 @@ public class TerminalSyncExecutor {
         
         try {
             // Send just the command (no marker)
-            String fullCommand = buildCommandWithMarker(command, "");
+            String fullCommand = buildCommandWithMarker(command, marker);
             log.info("Executing synchronized command in session {}: {}", sessionId, command);
             
             // Write command to terminal (this makes it visible to user)
@@ -153,16 +167,17 @@ public class TerminalSyncExecutor {
             
             // Process output
             String raw = rawOutput.toString();
-            String clean = cleanOutput(raw, command, "");
+            String clean = cleanOutput(raw, command, marker);
+            boolean success = completed && (markerFound.get() ? exitCode.get() == 0 : promptFound.get());
             
             log.info("Command completed in {}ms, success={}, outputLen={}", 
-                     executionTime, completed && promptFound.get(), clean.length());
+                     executionTime, success, clean.length());
             
             return SyncCommandResult.builder()
                     .command(command)
                     .cleanOutput(clean)
                     .rawOutput(raw)
-                    .success(completed && promptFound.get())
+                    .success(success)
                     .timedOut(!completed)
                     .executionTimeMs(executionTime)
                     .workingDirectory(session.getCurrentDirectory())
@@ -233,13 +248,15 @@ public class TerminalSyncExecutor {
      * We detect completion by watching for the shell prompt to reappear.
      */
     private String buildCommandWithMarker(String command, String marker) {
+        if (marker == null || marker.isBlank()) {
+            return systemInspector.isWindows() ? command + "\r" : command + "\n";
+        }
         if (systemInspector.isWindows()) {
-            // PowerShell: just send the command with carriage return
-            // We'll detect completion when we see the PS prompt again
-            return command + "\r";
+            return command + "\r" +
+                    "$nexusExit = if ($?) { 0 } elseif ($LASTEXITCODE -ne $null) { $LASTEXITCODE } else { 1 }; " +
+                    "Write-Output \"" + marker + ":$nexusExit\"\r";
         } else {
-            // Unix: just send the command with newline
-            return command + "\n";
+            return command + "\nprintf '\\n" + marker + ":%s\\n' \"$?\"\n";
         }
     }
     
@@ -262,9 +279,7 @@ public class TerminalSyncExecutor {
                 
                 // Check if we've been idle too long (command might be done but prompt missed)
                 long idleTime = System.currentTimeMillis() - lastOutputTime.get();
-                if (output.length() > 0 && idleTime > IDLE_TIMEOUT_MS) {
-                    // If idle for too long, assume command finished
-                    log.info("Command idle for {}ms, assuming completion", idleTime);
+                if (output.length() > 0 && idleTime > IDLE_TIMEOUT_MS && markerFound.get()) {
                     return true;
                 }
                 
@@ -278,6 +293,22 @@ public class TerminalSyncExecutor {
             Thread.currentThread().interrupt();
             return false;
         }
+    }
+
+    private Integer extractExitCode(String output, String marker) {
+        if (output == null || marker == null || marker.isBlank()) {
+            return null;
+        }
+        Pattern markerPattern = Pattern.compile(Pattern.quote(marker) + ":(-?\\d+)");
+        Matcher matcher = markerPattern.matcher(output);
+        Integer parsed = null;
+        while (matcher.find()) {
+            try {
+                parsed = Integer.parseInt(matcher.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return parsed;
     }
     
     /**
@@ -312,6 +343,10 @@ public class TerminalSyncExecutor {
             if (trimmed.contains("###SYNC_END_") || trimmed.contains("Write-Output '###")) {
                 continue;
             }
+
+            if (!marker.isBlank() && trimmed.contains(marker)) {
+                continue;
+            }
             
             // Skip PowerShell prompts
             if (PS_PROMPT_PATTERN.matcher(trimmed).find()) {
@@ -340,8 +375,14 @@ public class TerminalSyncExecutor {
      * Check if a line contains the command (for echo detection).
      */
     private boolean containsCommand(String line, String command) {
+        if (command == null || command.isBlank()) {
+            return false;
+        }
         // Compare first 30 chars of command
         String cmdPrefix = command.substring(0, Math.min(30, command.length()));
+        if (cmdPrefix.isBlank()) {
+            return false;
+        }
         return line.contains(cmdPrefix);
     }
 }
