@@ -9,8 +9,12 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 /**
@@ -23,6 +27,8 @@ public class ChatHistoryRepository {
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+    private final Map<String, LinkedList<ChatMessage>> memoryHistory = new ConcurrentHashMap<>();
+    private final AtomicBoolean fallbackLogged = new AtomicBoolean(false);
 
     // Redis Key 的前缀
     private static final String KEY_PREFIX = "chat:history:";
@@ -46,24 +52,22 @@ public class ChatHistoryRepository {
         String key = KEY_PREFIX + sessionId;
         try {
             String jsonMessage = objectMapper.writeValueAsString(message);
-            // 右端（尾部）推入消息
             redisTemplate.opsForList().rightPush(key, jsonMessage);
-
-            // 限制列表长度，仅保留最新记录
             if (maxHistorySize > 0) {
                 long size = redisTemplate.opsForList().size(key);
                 if (size > maxHistorySize) {
                     redisTemplate.opsForList().trim(key, size - maxHistorySize, -1);
                 }
             }
-
-            // 刷新过期时间
             if (expireHours > 0) {
                 redisTemplate.expire(key, expireHours, TimeUnit.HOURS);
             }
-
         } catch (JsonProcessingException e) {
             log.error("将聊天消息序列化到 Redis 时发生错误, sessionId: {}", sessionId, e);
+            pushToMemory(sessionId, message);
+        } catch (Exception e) {
+            logRedisFallback(e);
+            pushToMemory(sessionId, message);
         }
     }
 
@@ -89,31 +93,30 @@ public class ChatHistoryRepository {
         }
 
         String key = KEY_PREFIX + sessionId;
-
-        // LRANGE 起始从 0 (头), -1 (尾)
-        List<String> jsonMessages = redisTemplate.opsForList().range(key, 0, -1);
-        if (jsonMessages == null || jsonMessages.isEmpty()) {
-            return new ArrayList<>();
+        try {
+            List<String> jsonMessages = redisTemplate.opsForList().range(key, 0, -1);
+            if (jsonMessages == null || jsonMessages.isEmpty()) {
+                return getFromMemory(sessionId, limit);
+            }
+            List<ChatMessage> results = jsonMessages.stream()
+                    .map(json -> {
+                        try {
+                            return objectMapper.readValue(json, ChatMessage.class);
+                        } catch (JsonProcessingException e) {
+                            log.warn("反序列化聊天消息失败", e);
+                            return null;
+                        }
+                    })
+                    .filter(msg -> msg != null)
+                    .collect(Collectors.toList());
+            if (limit > 0 && results.size() > limit) {
+                return results.subList(results.size() - limit, results.size());
+            }
+            return results;
+        } catch (Exception e) {
+            logRedisFallback(e);
+            return getFromMemory(sessionId, limit);
         }
-
-        List<ChatMessage> results = jsonMessages.stream()
-                .map(json -> {
-                    try {
-                        return objectMapper.readValue(json, ChatMessage.class);
-                    } catch (JsonProcessingException e) {
-                        log.warn("反序列化聊天消息失败", e);
-                        return null;
-                    }
-                })
-                .filter(msg -> msg != null)
-                .collect(Collectors.toList());
-
-        // 如果要限制取出的数量，比如仅取最后 limit 条
-        if (limit > 0 && results.size() > limit) {
-            return results.subList(results.size() - limit, results.size());
-        }
-
-        return results;
     }
 
     /**
@@ -121,8 +124,44 @@ public class ChatHistoryRepository {
      */
     public void clearHistory(String sessionId) {
         if (sessionId != null && !sessionId.isEmpty()) {
-            redisTemplate.delete(KEY_PREFIX + sessionId);
+            try {
+                redisTemplate.delete(KEY_PREFIX + sessionId);
+            } catch (Exception e) {
+                logRedisFallback(e);
+            }
+            memoryHistory.remove(sessionId);
             log.debug("清除了会话 {} 的 AI 聊天历史", sessionId);
+        }
+    }
+
+    private void pushToMemory(String sessionId, ChatMessage message) {
+        memoryHistory.compute(sessionId, (key, existing) -> {
+            LinkedList<ChatMessage> list = existing == null ? new LinkedList<>() : existing;
+            list.add(message);
+            if (maxHistorySize > 0) {
+                while (list.size() > maxHistorySize) {
+                    list.removeFirst();
+                }
+            }
+            return list;
+        });
+    }
+
+    private List<ChatMessage> getFromMemory(String sessionId, int limit) {
+        List<ChatMessage> list = memoryHistory.get(sessionId);
+        if (list == null || list.isEmpty()) {
+            return new ArrayList<>();
+        }
+        List<ChatMessage> snapshot = new ArrayList<>(list);
+        if (limit > 0 && snapshot.size() > limit) {
+            return new ArrayList<>(snapshot.subList(snapshot.size() - limit, snapshot.size()));
+        }
+        return snapshot;
+    }
+
+    private void logRedisFallback(Exception e) {
+        if (fallbackLogged.compareAndSet(false, true)) {
+            log.warn("Redis 不可用，AI 对话历史已降级到内存存储: {}", e.getMessage());
         }
     }
 }

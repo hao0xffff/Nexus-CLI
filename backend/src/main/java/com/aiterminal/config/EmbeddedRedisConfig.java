@@ -33,18 +33,35 @@ public class EmbeddedRedisConfig {
     @Value("${app.redis.max-heap:128M}")
     private String maxHeap;
 
+    @Value("${app.redis.embedded.enabled:true}")
+    private boolean embeddedEnabled;
+
+    @Value("${app.redis.embedded.fail-fast:false}")
+    private boolean failFast;
+
     @Autowired
     private ApplicationContext context;
 
     @PostConstruct
     public void init() {
-        // 如果开启了多轮对话特性，则启动内嵌的 Redis
-        if (AppConfig.isAiMultiTurnEnabled()) {
-            try {
-                startRedis();
-            } catch (Throwable t) {
-                log.error("[Embedded Redis] 初始化失败: {}", t.getMessage(), t);
+        if (!AppConfig.isAiMultiTurnEnabled()) {
+            return;
+        }
+        if (!embeddedEnabled) {
+            log.info("[Embedded Redis] 已禁用内嵌 Redis，使用外部 Redis 或降级存储。");
+            return;
+        }
+        if (isUnsupportedEmbeddedPlatform()) {
+            log.warn("[Embedded Redis] 当前平台可能不支持 embedded-redis，跳过启动并使用降级存储。");
+            return;
+        }
+        try {
+            startRedis();
+        } catch (Throwable t) {
+            if (failFast) {
+                throw new IllegalStateException("[Embedded Redis] 初始化失败", t);
             }
+            log.warn("[Embedded Redis] 初始化失败，继续以降级模式运行: {}", t.getMessage());
         }
     }
 
@@ -114,9 +131,20 @@ public class EmbeddedRedisConfig {
 
             log.info("-----------------------------------------------------");
         } catch (Throwable e) {
-            log.error("[Embedded Redis] 启动失败: {}", e.getMessage(), e);
+            if (failFast) {
+                throw e;
+            }
+            log.warn("[Embedded Redis] 启动失败，继续以降级模式运行: {}", e.getMessage());
             redisServer = null;
         }
+    }
+
+    private boolean isUnsupportedEmbeddedPlatform() {
+        String osName = System.getProperty("os.name", "").toLowerCase();
+        String osArch = System.getProperty("os.arch", "").toLowerCase();
+        boolean isMac = osName.contains("mac");
+        boolean isArm = osArch.contains("aarch64") || osArch.contains("arm64");
+        return isMac && isArm;
     }
 
     @PreDestroy

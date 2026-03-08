@@ -120,7 +120,7 @@ public class SecureStorage {
             return new String(plainText, StandardCharsets.UTF_8);
             
         } catch (Exception e) {
-            log.error("Decryption failed", e);
+            log.warn("Decryption failed: {}", e.getMessage());
             return encrypted;
         }
     }

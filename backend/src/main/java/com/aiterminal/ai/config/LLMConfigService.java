@@ -146,11 +146,10 @@ public class LLMConfigService {
                 config = objectMapper.readValue(configFile, LLMConfig.class);
                 log.info("Loaded LLM config from: {}", configFilePath);
                 
-                // Decrypt API keys after loading
-                decryptApiKeys();
+                boolean configChanged = decryptApiKeys();
                 
                 // Check if migration needed (plaintext -> encrypted)
-                if (needsMigration()) {
+                if (needsMigration() || configChanged) {
                     log.info("Migrating plaintext API keys to encrypted storage...");
                     saveConfig(); // Will encrypt on save
                 }
@@ -210,16 +209,47 @@ public class LLMConfigService {
     /**
      * Decrypt API keys after loading from file.
      */
-    private void decryptApiKeys() {
+    private boolean decryptApiKeys() {
+        boolean changed = false;
+
         if (config.getOpenai() != null && config.getOpenai().getApiKey() != null) {
-            String decrypted = secureStorage.decrypt(config.getOpenai().getApiKey());
-            config.getOpenai().setApiKey(decrypted);
+            String apiKey = config.getOpenai().getApiKey();
+            if (secureStorage.isEncrypted(apiKey)) {
+                String decrypted = secureStorage.decrypt(apiKey);
+                if (secureStorage.isEncrypted(decrypted)) {
+                    log.warn("OpenAI API key decryption failed, resetting encrypted value");
+                    String fallbackKey = defaultOpenaiKey;
+                    if (fallbackKey != null && !fallbackKey.isEmpty() && !fallbackKey.equals("your-api-key")) {
+                        config.getOpenai().setApiKey(fallbackKey);
+                    } else {
+                        config.getOpenai().setApiKey("");
+                    }
+                    changed = true;
+                } else {
+                    config.getOpenai().setApiKey(decrypted);
+                }
+            } else {
+                config.getOpenai().setApiKey(apiKey);
+            }
         }
         
         if (config.getCustom() != null && config.getCustom().getApiKey() != null) {
-            String decrypted = secureStorage.decrypt(config.getCustom().getApiKey());
-            config.getCustom().setApiKey(decrypted);
+            String apiKey = config.getCustom().getApiKey();
+            if (secureStorage.isEncrypted(apiKey)) {
+                String decrypted = secureStorage.decrypt(apiKey);
+                if (secureStorage.isEncrypted(decrypted)) {
+                    log.warn("Custom API key decryption failed, resetting encrypted value");
+                    config.getCustom().setApiKey("");
+                    changed = true;
+                } else {
+                    config.getCustom().setApiKey(decrypted);
+                }
+            } else {
+                config.getCustom().setApiKey(apiKey);
+            }
         }
+
+        return changed;
     }
 
     /**

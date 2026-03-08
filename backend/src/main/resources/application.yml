@@ -36,6 +36,9 @@ app:
   redis:
     port: 26379
     max-heap: 128M
+    embedded:
+      enabled: true
+      fail-fast: false
     chat:
       max-history-size: -1 # -1表示单会话无最大条数限制
       expire-hours: -1     # -1表示会话数据永不过期
