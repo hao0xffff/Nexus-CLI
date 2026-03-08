@@ -4,6 +4,7 @@ import com.aiterminal.ai.react.ReActAgent;
 import com.aiterminal.ai.react.ReActStatus;
 import com.aiterminal.ai.react.dto.ReActRequest;
 import com.aiterminal.ai.react.dto.ReActStepResponse;
+import com.aiterminal.worklog.WorkLogService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,6 +28,7 @@ public class ReActController {
 
     private final ReActAgent reactAgent;
     private final ObjectMapper objectMapper;
+    private final WorkLogService workLogService;
 
     // Track active tasks for cancellation
     private final Map<String, Boolean> activeTasks = new ConcurrentHashMap<>();
@@ -40,6 +42,17 @@ public class ReActController {
     @PostMapping(value = "/execute", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter executeTask(@RequestBody ReActRequest request) {
         log.info("Starting ReAct task: {} for session: {}", request.getTask(), request.getSessionId());
+        workLogService.record(
+                "REACT",
+                "TASK_START",
+                "INFO",
+                request.getSessionId(),
+                null,
+                "ReAct task started",
+                request.getTask(),
+                "RUNNING",
+                null
+        );
         
         SseEmitter emitter = new SseEmitter(600000L); // 10 minute timeout for long tasks
         String taskId = request.getSessionId() + "-" + System.currentTimeMillis();
@@ -91,6 +104,17 @@ public class ReActController {
                         if (step.getStatus() == ReActStatus.COMPLETED || 
                             step.getStatus() == ReActStatus.ERROR ||
                             step.getStatus() == ReActStatus.CANCELLED) {
+                            workLogService.record(
+                                    "REACT",
+                                    "TASK_FINISH",
+                                    step.getStatus() == ReActStatus.COMPLETED ? "INFO" : "WARN",
+                                    request.getSessionId(),
+                                    null,
+                                    "ReAct task finished",
+                                    step.getOutput() == null ? "" : step.getOutput(),
+                                    step.getStatus().name(),
+                                    null
+                            );
                             emitterActive.remove(taskId);
                             emitter.complete();
                         }
@@ -120,6 +144,17 @@ public class ReActController {
     @PostMapping("/cancel/{sessionId}")
     public Map<String, Object> cancelTask(@PathVariable String sessionId) {
         log.info("Cancelling ReAct task for session: {}", sessionId);
+        workLogService.record(
+                "REACT",
+                "TASK_CANCEL",
+                "WARN",
+                sessionId,
+                null,
+                "ReAct task cancellation requested",
+                "",
+                "CANCELLED",
+                null
+        );
         
         // Find and cancel active tasks for this session
         activeTasks.keySet().stream()

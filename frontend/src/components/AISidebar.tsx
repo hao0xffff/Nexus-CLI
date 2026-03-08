@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Trash2, Bot, User, Loader2, Terminal, FileCode, Bug, Settings2, Settings, Wand2 } from 'lucide-react'
+import { Send, Trash2, Bot, User, Loader2, Terminal, FileCode, Bug, Settings2, Settings, Wand2, ScrollText } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAI } from '../contexts/AIContext'
 import CommandCardComponent from './CommandCard'
 import LLMSettings from './LLMSettings'
 import ReActPanel from './ReActPanel'
+import WorkLogPanel from './WorkLogPanel'
 
 // Quick action buttons for common queries
 const QUICK_ACTIONS = [
@@ -20,6 +21,7 @@ export default function AISidebar() {
   const [input, setInput] = useState('')
   const [showSettings, setShowSettings] = useState(false)
   const [showReActPanel, setShowReActPanel] = useState(false)
+  const [showWorkLogPanel, setShowWorkLogPanel] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -66,6 +68,9 @@ export default function AISidebar() {
   if (showReActPanel) {
     return <ReActPanel onClose={() => setShowReActPanel(false)} />
   }
+  if (showWorkLogPanel) {
+    return <WorkLogPanel onClose={() => setShowWorkLogPanel(false)} />
+  }
 
   return (
     <>
@@ -109,6 +114,13 @@ export default function AISidebar() {
             title="ReAct Agent Mode (Auto-execute tasks)"
           >
             <Wand2 size={14} />
+          </button>
+          <button
+            onClick={() => setShowWorkLogPanel(true)}
+            className="p-1.5 text-terminal-fg/60 hover:text-terminal-cyan rounded transition-colors"
+            title="Work Logs"
+          >
+            <ScrollText size={14} />
           </button>
           {/* Settings */}
           <button

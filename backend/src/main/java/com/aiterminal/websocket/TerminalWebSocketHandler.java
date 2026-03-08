@@ -3,6 +3,7 @@ package com.aiterminal.websocket;
 import com.aiterminal.terminal.ITerminalSession;
 import com.aiterminal.terminal.SSHSession;
 import com.aiterminal.terminal.TerminalSessionManager;
+import com.aiterminal.worklog.WorkLogService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +28,7 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
 
     private final TerminalSessionManager sessionManager;
     private final ObjectMapper objectMapper;
+    private final WorkLogService workLogService;
 
     // Map WebSocket sessions to terminal sessions
     private final Map<String, ITerminalSession> wsToTerminal = new ConcurrentHashMap<>();
@@ -89,6 +91,17 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
                 "sessionId", terminal.getSessionId(),
                 "sessionType", "local"
         ));
+        workLogService.record(
+                "TERMINAL",
+                "SESSION_INIT",
+                "INFO",
+                terminal.getSessionId(),
+                null,
+                "Local terminal session initialized",
+                "wsSession=" + wsSession.getId() + ", cols=" + cols + ", rows=" + rows,
+                "SUCCESS",
+                null
+        );
 
         log.info("Local terminal session {} started for WebSocket {}", 
                 terminal.getSessionId(), wsSession.getId());
@@ -126,10 +139,32 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
                     "sessionType", "ssh",
                     "connectionInfo", ((SSHSession) terminal).getConnectionInfo()
             ));
+            workLogService.record(
+                    "TERMINAL",
+                    "SESSION_INIT_SSH",
+                    "INFO",
+                    terminal.getSessionId(),
+                    null,
+                    "SSH terminal session initialized",
+                    "wsSession=" + wsSession.getId() + ", host=" + host + ", port=" + port + ", user=" + username,
+                    "SUCCESS",
+                    null
+            );
             log.info("SSH terminal session {} started for WebSocket {}", 
                     terminal.getSessionId(), wsSession.getId());
         } catch (IOException e) {
             wsToTerminal.remove(wsSession.getId());
+            workLogService.record(
+                    "TERMINAL",
+                    "SESSION_INIT_SSH",
+                    "ERROR",
+                    terminal.getSessionId(),
+                    null,
+                    "SSH terminal session failed",
+                    e.getMessage(),
+                    "FAILED",
+                    null
+            );
             sendError(wsSession, "SSH connection failed: " + e.getMessage());
         }
     }
@@ -206,6 +241,17 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
         ITerminalSession terminal = wsToTerminal.remove(wsSession.getId());
         if (terminal != null) {
             terminal.close();
+            workLogService.record(
+                    "TERMINAL",
+                    "SESSION_CLOSE",
+                    "INFO",
+                    terminal.getSessionId(),
+                    null,
+                    "Terminal session closed",
+                    "wsSession=" + wsSession.getId(),
+                    "SUCCESS",
+                    null
+            );
         }
     }
 
@@ -218,6 +264,17 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
     @Override
     public void handleTransportError(WebSocketSession session, Throwable exception) throws Exception {
         log.error("WebSocket transport error for session {}", session.getId(), exception);
+        workLogService.record(
+                "TERMINAL",
+                "TRANSPORT_ERROR",
+                "ERROR",
+                null,
+                null,
+                "Terminal websocket transport error",
+                "wsSession=" + session.getId() + ", error=" + exception.getMessage(),
+                "FAILED",
+                null
+        );
         handleClose(session);
     }
 

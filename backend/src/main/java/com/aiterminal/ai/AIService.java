@@ -5,6 +5,7 @@ import com.aiterminal.ai.dto.ChatMessage;
 import com.aiterminal.ai.dto.ChatRequest;
 import com.aiterminal.ai.dto.ChatResponse;
 import com.aiterminal.ai.dto.CommandCard;
+import com.aiterminal.worklog.WorkLogService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -34,15 +35,17 @@ public class AIService {
     private final CommandGuard commandGuard;
     private final ObjectMapper objectMapper;
     private final LLMConfigService configService;
+    private final WorkLogService workLogService;
     private final HttpClient httpClient;  // Shared HttpClient from config
 
     public AIService(ContextBuilder contextBuilder, CommandGuard commandGuard, 
                      ObjectMapper objectMapper, LLMConfigService configService,
-                     HttpClient sharedHttpClient) {
+                     WorkLogService workLogService, HttpClient sharedHttpClient) {
         this.contextBuilder = contextBuilder;
         this.commandGuard = commandGuard;
         this.objectMapper = objectMapper;
         this.configService = configService;
+        this.workLogService = workLogService;
         this.httpClient = sharedHttpClient;
     }
 
@@ -67,6 +70,7 @@ public class AIService {
      * Process a chat request and return AI response.
      */
     public ChatResponse chat(ChatRequest request) {
+        long startTime = System.currentTimeMillis();
         try {
             // Use provider from request, or fall back to config service
             AIProvider provider;
@@ -92,6 +96,20 @@ public class AIService {
 
             // Parse command cards from response
             List<CommandCard> commands = parseCommands(response);
+            long durationMs = System.currentTimeMillis() - startTime;
+            workLogService.record(
+                    "AI",
+                    "CHAT",
+                    "INFO",
+                    request.getSessionId(),
+                    provider.getValue(),
+                    "AI chat completed",
+                    "history=" + (request.getHistory() == null ? 0 : request.getHistory().size()) +
+                            ", terminalChars=" + (request.getTerminalOutput() == null ? 0 : request.getTerminalOutput().length()) +
+                            ", commands=" + commands.size(),
+                    "SUCCESS",
+                    durationMs
+            );
 
             return ChatResponse.builder()
                     .message(response)
@@ -102,6 +120,18 @@ public class AIService {
 
         } catch (Exception e) {
             log.error("AI chat failed", e);
+            long durationMs = System.currentTimeMillis() - startTime;
+            workLogService.record(
+                    "AI",
+                    "CHAT",
+                    "ERROR",
+                    request.getSessionId(),
+                    request.getProvider(),
+                    "AI chat failed",
+                    e.getClass().getSimpleName() + ": " + e.getMessage(),
+                    "FAILED",
+                    durationMs
+            );
             return ChatResponse.builder()
                     .message("Sorry, I encountered an error: " + e.getMessage())
                     .success(false)

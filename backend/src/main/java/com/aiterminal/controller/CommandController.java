@@ -2,6 +2,7 @@ package com.aiterminal.controller;
 
 import com.aiterminal.terminal.CommandExecutor;
 import com.aiterminal.terminal.CommandExecutor.CommandResult;
+import com.aiterminal.worklog.WorkLogService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -20,6 +21,7 @@ import java.util.Map;
 public class CommandController {
 
     private final CommandExecutor commandExecutor;
+    private final WorkLogService workLogService;
 
     /**
      * Execute a command and return clean output.
@@ -46,8 +48,20 @@ public class CommandController {
         }
 
         log.info("API command execution request: session={}, command={}", sessionId, command);
+        long startTime = System.currentTimeMillis();
 
         CommandResult result = commandExecutor.execute(sessionId, command, timeoutMs);
+        workLogService.record(
+                "COMMAND",
+                "EXECUTE",
+                result.isSuccess() ? "INFO" : "WARN",
+                sessionId,
+                null,
+                "Command executed via API",
+                "command=" + command + ", exitCode=" + result.getExitCode() + ", timedOut=" + result.isTimedOut(),
+                result.isSuccess() ? "SUCCESS" : "FAILED",
+                System.currentTimeMillis() - startTime
+        );
 
         return Map.of(
             "success", result.isSuccess(),

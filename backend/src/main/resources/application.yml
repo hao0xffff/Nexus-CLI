@@ -4,6 +4,23 @@ server:
 spring:
   application:
     name: ai-terminal
+  datasource:
+    url: ${WORKLOG_DB_URL:jdbc:postgresql://localhost:5432/ai_terminal}
+    username: ${WORKLOG_DB_USERNAME:postgres}
+    password: ${WORKLOG_DB_PASSWORD:postgres}
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        format_sql: false
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
   
   # AI Configuration
   ai:
