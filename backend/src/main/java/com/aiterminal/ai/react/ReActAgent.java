@@ -7,6 +7,7 @@ import com.aiterminal.terminal.ITerminalSession;
 import com.aiterminal.terminal.TerminalSessionManager;
 import com.aiterminal.terminal.sync.SyncCommandResult;
 import com.aiterminal.terminal.sync.TerminalSyncExecutor;
+import com.aiterminal.ai.ChatHistoryRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -53,14 +54,16 @@ public class ReActAgent {
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
     private final ExecutorService reactExecutor;
+    private final ChatHistoryRepository chatHistoryRepository;
     private final Map<String, CompletableFuture<Void>> runningTasks = new ConcurrentHashMap<>();
     private final Map<String, AtomicBoolean> cancelFlags = new ConcurrentHashMap<>();
 
     public ReActAgent(ReActPrompt reactPrompt, CommandGuard commandGuard,
-                      LLMConfigService configService, TerminalSessionManager sessionManager,
-                      TerminalSyncExecutor syncExecutor, ObjectMapper objectMapper,
-                      HttpClient sharedHttpClient,
-                      @Qualifier("reactExecutor") ExecutorService reactExecutor) {
+            LLMConfigService configService, TerminalSessionManager sessionManager,
+            TerminalSyncExecutor syncExecutor, ObjectMapper objectMapper,
+            HttpClient sharedHttpClient,
+            @Qualifier("reactExecutor") ExecutorService reactExecutor,
+            ChatHistoryRepository chatHistoryRepository) {
         this.reactPrompt = reactPrompt;
         this.commandGuard = commandGuard;
         this.configService = configService;
@@ -69,11 +72,12 @@ public class ReActAgent {
         this.objectMapper = objectMapper;
         this.httpClient = sharedHttpClient;
         this.reactExecutor = reactExecutor;
+        this.chatHistoryRepository = chatHistoryRepository;
     }
 
-    private static final int MAX_STEPS = 30;  // For complex multi-step tasks
-    private static final long DEFAULT_COMMAND_TIMEOUT_MS = 60000;  // Default 60 seconds
-    private static final long MAX_COMMAND_TIMEOUT_MS = 300000;  // Max 5 minutes for long operations
+    private static final int MAX_STEPS = 30; // For complex multi-step tasks
+    private static final long DEFAULT_COMMAND_TIMEOUT_MS = 60000; // Default 60 seconds
+    private static final long MAX_COMMAND_TIMEOUT_MS = 300000; // Max 5 minutes for long operations
 
     // Pattern to parse ReAct response
     private static final Pattern THOUGHT_PATTERN = Pattern.compile(
@@ -144,10 +148,19 @@ public class ReActAgent {
         String systemPrompt = reactPrompt.buildSystemPrompt();
         // Get current directory from terminal session
         String currentDir = terminalSession.getCurrentDirectory();
-        
-        List<ChatMessage> conversationHistory = new ArrayList<>();
+
+        String reactSessionId = "react:" + sessionId;
+
+        // 从 Redis 拉取之前的环境上下文（如果用户有之前聊过天）
+        List<ChatMessage> conversationHistory = chatHistoryRepository.getRecentHistory(reactSessionId, 4);
+
         String userMessage = reactPrompt.buildTaskMessage(task, currentDir);
-        
+
+        // 将用户的初始任务声明存入 Redis
+        chatHistoryRepository.pushMessage(reactSessionId,
+                ChatMessage.builder().role("user").content("请帮我完成任务：" + task).timestamp(System.currentTimeMillis())
+                        .build());
+
         stepCallback.accept(ReActStep.started(task));
 
         for (int step = 0; step < MAX_STEPS; step++) {
@@ -156,17 +169,17 @@ public class ReActAgent {
                 return;
             }
             log.info("ReAct step {} for task: {}", step + 1, task);
-            
+
             // Call LLM
             String llmResponse = callLLM(systemPrompt, userMessage, conversationHistory);
             if (isCancelled(sessionId)) {
                 stepCallback.accept(ReActStep.cancelled("Task cancelled by user"));
                 return;
             }
-            
+
             // Parse response
             ReActParsedResponse parsed = parseResponse(llmResponse);
-            
+
             if (parsed == null) {
                 stepCallback.accept(ReActStep.error("Failed to parse AI response"));
                 return;
@@ -180,11 +193,16 @@ public class ReActAgent {
                     .actionInput(parsed.actionInput)
                     .status(ReActStatus.RUNNING)
                     .build();
-            
+
             stepCallback.accept(stepResult);
 
-            // Add to history
+            // Add to memory history
             conversationHistory.add(new ChatMessage("assistant", llmResponse, System.currentTimeMillis()));
+
+            // 将智能体每一步的思考和计划也存入全局 Redis，让普通对话也能看到（或者以专门的形式）
+            chatHistoryRepository.pushMessage(reactSessionId,
+                    ChatMessage.builder().role("assistant").content(llmResponse).timestamp(System.currentTimeMillis())
+                            .build());
 
             // Handle action
             switch (parsed.action.toUpperCase()) {
@@ -208,22 +226,23 @@ public class ReActAgent {
                     String command = parsed.actionInput.trim();
                     if (command.isBlank()) {
                         stepResult.setStatus(ReActStatus.RUNNING);
-                        stepResult.setOutput("No executable command parsed. Please provide one concrete single-line command.");
+                        stepResult.setOutput(
+                                "No executable command parsed. Please provide one concrete single-line command.");
                         stepCallback.accept(stepResult);
                         userMessage = "Your previous ACTION_INPUT did not contain a valid single-line command. Provide exactly one runnable command.";
                         conversationHistory.add(new ChatMessage("user", userMessage, System.currentTimeMillis()));
                         continue;
                     }
-                    
+
                     // Validate command safety
                     CommandGuard.ValidationResult validation = commandGuard.validate(command);
                     if (!validation.isSafe() && validation.getRiskLevel() == CommandGuard.RiskLevel.DANGEROUS) {
                         stepResult.setStatus(ReActStatus.BLOCKED);
                         stepResult.setOutput("Command blocked: " + validation.getWarning());
                         stepCallback.accept(stepResult);
-                        
-                        userMessage = "The command was blocked for safety reasons: " + validation.getWarning() + 
-                                     ". Please try a different approach.";
+
+                        userMessage = "The command was blocked for safety reasons: " + validation.getWarning() +
+                                ". Please try a different approach.";
                         conversationHistory.add(new ChatMessage("user", userMessage, System.currentTimeMillis()));
                         continue;
                     }
@@ -231,11 +250,11 @@ public class ReActAgent {
                     // Calculate smart timeout based on command type
                     long timeout = syncExecutor.estimateTimeout(command);
                     log.info("Executing command in terminal {}: {} (timeout: {}ms)", sessionId, command, timeout);
-                    
+
                     // Update step to show command is executing
                     stepResult.setOutput("Executing: " + command);
                     stepCallback.accept(stepResult);
-                    
+
                     // Execute command THROUGH the PTY terminal
                     // This ensures:
                     // 1. User sees the command and output in the terminal
@@ -246,15 +265,15 @@ public class ReActAgent {
                         stepCallback.accept(ReActStep.cancelled("Task cancelled by user"));
                         return;
                     }
-                    
+
                     // Log execution result
-                    log.info("Command completed: success={}, timedOut={}, outputLen={}", 
-                        cmdResult.isSuccess(), cmdResult.isTimedOut(), 
-                        cmdResult.getCleanOutput().length());
-                    
+                    log.info("Command completed: success={}, timedOut={}, outputLen={}",
+                            cmdResult.isSuccess(), cmdResult.isTimedOut(),
+                            cmdResult.getCleanOutput().length());
+
                     // Update step with result - this displays in ReAct panel
                     stepResult.setOutput(cmdResult.getCleanOutput());
-                    
+
                     // Determine status based on result
                     if (cmdResult.isTimedOut()) {
                         stepResult.setStatus(ReActStatus.RUNNING);
@@ -265,14 +284,14 @@ public class ReActAgent {
                         // Command completed (may have errors but we continue)
                         stepResult.setStatus(ReActStatus.RUNNING);
                     }
-                    
+
                     stepCallback.accept(stepResult);
 
                     // Prepare continuation message for LLM
                     String outputForLLM = buildOutputMessage(cmdResult);
                     userMessage = reactPrompt.buildContinuationMessage(outputForLLM, cmdResult.isSuccess());
                     conversationHistory.add(new ChatMessage("user", userMessage, System.currentTimeMillis()));
-                    
+
                     // Update current directory if available
                     if (cmdResult.getWorkingDirectory() != null) {
                         currentDir = cmdResult.getWorkingDirectory();
@@ -300,13 +319,13 @@ public class ReActAgent {
         AtomicBoolean flag = cancelFlags.get(sessionId);
         return Thread.currentThread().isInterrupted() || (flag != null && flag.get());
     }
-    
+
     /**
      * Build a detailed output message for LLM consumption.
      */
     private String buildOutputMessage(SyncCommandResult result) {
         StringBuilder sb = new StringBuilder();
-        
+
         // Clear status line first - most important for LLM decision making
         if (result.isTimedOut()) {
             sb.append("COMMAND STATUS: TIMED OUT\n");
@@ -315,14 +334,14 @@ public class ReActAgent {
         } else {
             sb.append("COMMAND STATUS: COMPLETED\n");
         }
-        
+
         sb.append("Execution Time: ").append(result.getExecutionTimeMs()).append("ms\n\n");
-        
+
         String output = result.getCleanOutput();
-        
-        if (output == null || output.isEmpty() || output.isBlank() || 
-            output.equals("(command executed successfully, no output)") ||
-            output.equals("(no output)")) {
+
+        if (output == null || output.isEmpty() || output.isBlank() ||
+                output.equals("(command executed successfully, no output)") ||
+                output.equals("(no output)")) {
             sb.append("OUTPUT: (no output - command completed silently, which is normal for mkdir, cd, etc.)\n");
         } else {
             sb.append("OUTPUT:\n");
@@ -335,7 +354,7 @@ public class ReActAgent {
                 sb.append(output);
             }
         }
-        
+
         // Add interpretation hints for common scenarios
         if (output != null) {
             if (output.contains("已存在") || output.contains("already exists") || output.contains("ResourceExists")) {
@@ -345,28 +364,30 @@ public class ReActAgent {
                 sb.append("\n\nNOTE: Something was not found - check if the path is correct.");
             }
         }
-        
+
         return sb.toString();
     }
-    
+
     /**
      * Clean output text for LLM consumption.
-     * Note: TerminalSyncExecutor already does most cleaning, this is for extra safety.
+     * Note: TerminalSyncExecutor already does most cleaning, this is for extra
+     * safety.
      */
     private String cleanOutputForLLM(String output) {
-        if (output == null) return "";
-        
+        if (output == null)
+            return "";
+
         return output
-            // Remove ANSI escape codes
-            .replaceAll("\\x1B\\[[0-9;]*[a-zA-Z]", "")
-            // Remove other control characters except newline, tab
-            .replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", "")
-            // Normalize line endings
-            .replaceAll("\\r\\n", "\n")
-            .replaceAll("\\r", "\n")
-            // Remove excessive blank lines
-            .replaceAll("\\n{3,}", "\n\n")
-            .trim();
+                // Remove ANSI escape codes
+                .replaceAll("\\x1B\\[[0-9;]*[a-zA-Z]", "")
+                // Remove other control characters except newline, tab
+                .replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", "")
+                // Normalize line endings
+                .replaceAll("\\r\\n", "\n")
+                .replaceAll("\\r", "\n")
+                // Remove excessive blank lines
+                .replaceAll("\\n{3,}", "\n\n")
+                .trim();
     }
 
     /**
@@ -392,8 +413,8 @@ public class ReActAgent {
             if (inputMatcher.find()) {
                 actionInput = inputMatcher.group(1).trim();
                 actionInput = actionInput.replaceAll("```[a-zA-Z]*", "")
-                                         .replace("```", "")
-                                         .trim();
+                        .replace("```", "")
+                        .trim();
 
                 String[] lines = actionInput.split("\\r?\\n");
                 for (String line : lines) {
@@ -417,22 +438,23 @@ public class ReActAgent {
         }
     }
 
-    // executeCommand method removed - now using commandExecutor directly with smart timeout
+    // executeCommand method removed - now using commandExecutor directly with smart
+    // timeout
 
     /**
      * Call the LLM API.
      */
     private String callLLM(String systemPrompt, String userMessage, List<ChatMessage> history) throws Exception {
         String activeProvider = configService.getActiveProvider();
-        
+
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", systemPrompt));
-        
+
         // Add full conversation history for complete context understanding
         for (ChatMessage msg : history) {
             messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
         }
-        
+
         messages.add(Map.of("role", "user", "content", userMessage));
 
         return switch (activeProvider) {
@@ -453,13 +475,12 @@ public class ReActAgent {
                 "stream", false,
                 "options", Map.of(
                         "temperature", 0.3,
-                        "num_predict", 2048,  // Increased for longer responses
-                        "num_ctx", 8192       // Larger context window
-                )
-        );
+                        "num_predict", 2048, // Increased for longer responses
+                        "num_ctx", 8192 // Larger context window
+                ));
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
-        
+
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/api/chat"))
                 .header("Content-Type", "application/json")
@@ -468,7 +489,7 @@ public class ReActAgent {
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        
+
         if (response.statusCode() != 200) {
             throw new RuntimeException("Ollama API error: " + response.statusCode());
         }
@@ -486,11 +507,11 @@ public class ReActAgent {
                 "model", model,
                 "messages", messages,
                 "temperature", 0.3,
-                "max_tokens", 2048  // Increased for longer responses
+                "max_tokens", 2048 // Increased for longer responses
         );
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
-        
+
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
@@ -500,7 +521,7 @@ public class ReActAgent {
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        
+
         if (response.statusCode() != 200) {
             log.error("OpenAI API error - Status: {}, Body: {}", response.statusCode(), response.body());
             throw new RuntimeException("OpenAI API error: " + response.statusCode() + " - " + response.body());
@@ -524,23 +545,23 @@ public class ReActAgent {
                 "model", model,
                 "messages", messages,
                 "temperature", 0.3,
-                "max_tokens", 2048  // Increased for longer responses
+                "max_tokens", 2048 // Increased for longer responses
         );
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
-        
+
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                .timeout(Duration.ofSeconds(120));  // Longer timeout for complex tasks
+                .timeout(Duration.ofSeconds(120)); // Longer timeout for complex tasks
 
         if (apiKey != null && !apiKey.isEmpty()) {
             requestBuilder.header("Authorization", "Bearer " + apiKey);
         }
 
         HttpResponse<String> response = httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
-        
+
         if (response.statusCode() != 200) {
             log.error("Custom API error - Status: {}, Body: {}", response.statusCode(), response.body());
             throw new RuntimeException("Custom API error: " + response.statusCode() + " - " + response.body());
@@ -557,5 +578,6 @@ public class ReActAgent {
     /**
      * Internal class for parsed response.
      */
-    private record ReActParsedResponse(String thought, String action, String actionInput) {}
+    private record ReActParsedResponse(String thought, String action, String actionInput) {
+    }
 }

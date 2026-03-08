@@ -21,8 +21,24 @@ spring:
     init:
       mode: always
       schema-locations: classpath:db/schema.sql
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 26379
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 0
   
-  # AI Configuration
+# redis配置
+app:
+  redis:
+    port: 26379
+    max-heap: 128M
+    chat:
+      max-history-size: -1 # -1表示单会话无最大条数限制
+      expire-hours: -1     # -1表示会话数据永不过期
   ai:
     openai:
       api-key: ${OPENAI_API_KEY:your-api-key}
