@@ -59,6 +59,22 @@ interface AIProviderProps {
   children: ReactNode
 }
 
+function extractNewOutput(before: string, after: string): string {
+  const beforeLines = before.split('\n')
+  const afterLines = after.split('\n')
+  let prefixLength = 0
+
+  while (
+    prefixLength < beforeLines.length &&
+    prefixLength < afterLines.length &&
+    beforeLines[prefixLength] === afterLines[prefixLength]
+  ) {
+    prefixLength++
+  }
+
+  return afterLines.slice(prefixLength).join('\n').trim()
+}
+
 export function AIProvider({ children }: AIProviderProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -171,7 +187,7 @@ export function AIProvider({ children }: AIProviderProps) {
     } finally {
       setIsLoading(false)
     }
-  }, [messages, provider, activeSessionId, getRecentOutput, getBackendUrl])
+  }, [messages, provider, activeSessionId, getRecentOutput])
 
   const executeCommand = useCallback(async (command: string): Promise<CommandExecution> => {
     const execution: CommandExecution = {
@@ -207,8 +223,7 @@ export function AIProvider({ children }: AIProviderProps) {
       // Get output after execution
       const outputAfter = getRecentOutput(activeSessionId, 20)
       
-      // Extract new output (simple diff)
-      const newOutput = outputAfter.replace(outputBefore, '').trim()
+      const newOutput = extractNewOutput(outputBefore, outputAfter)
       
       execution.status = 'success'
       execution.output = newOutput || 'Command sent successfully'

@@ -2,7 +2,8 @@ package com.aiterminal.terminal.sync;
 
 import com.aiterminal.terminal.ITerminalSession;
 import com.aiterminal.terminal.TerminalSessionManager;
-import com.aiterminal.util.SystemInspector;
+import com.aiterminal.terminal.sync.parser.TerminalSyncParser;
+import com.aiterminal.terminal.sync.parser.TerminalSyncParserResolver;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
@@ -39,21 +40,19 @@ public class TerminalSyncExecutor {
     
     // ANSI escape code pattern
     private static final Pattern ANSI_PATTERN = Pattern.compile("\\x1B\\[[0-9;]*[a-zA-Z]");
-    // PowerShell prompt pattern
-    private static final Pattern PS_PROMPT_PATTERN = Pattern.compile("^PS\\s+[A-Za-z]:\\\\.*>\\s*");
     // Control character pattern
     private static final Pattern CONTROL_CHAR_PATTERN = Pattern.compile("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]");
     
     private final TerminalSessionManager sessionManager;
-    private final SystemInspector systemInspector;
+    private final TerminalSyncParserResolver parserResolver;
     private final ExecutorService executor;
     
     public TerminalSyncExecutor(
             TerminalSessionManager sessionManager,
-            SystemInspector systemInspector,
+            TerminalSyncParserResolver parserResolver,
             @Qualifier("commandExecutorPool") ExecutorService executor) {
         this.sessionManager = sessionManager;
-        this.systemInspector = systemInspector;
+        this.parserResolver = parserResolver;
         this.executor = executor;
     }
     
@@ -86,6 +85,7 @@ public class TerminalSyncExecutor {
         
         StringBuilder rawOutput = new StringBuilder();
         String marker = generateEndMarker();
+        TerminalSyncParser parser = parserResolver.resolve();
         String commandProbe = command == null ? "" : command.substring(0, Math.min(20, command.length()));
         AtomicBoolean promptFound = new AtomicBoolean(false);
         AtomicBoolean markerFound = new AtomicBoolean(false);
@@ -132,18 +132,9 @@ public class TerminalSyncExecutor {
                 // Check for PowerShell prompt pattern at the end: PS C:\...>
                 // or bash prompt: user@host:~$
                 String trimmedEnd = currentOutput.substring(Math.max(0, currentOutput.length() - 200));
-                if (systemInspector.isWindows()) {
-                    // PowerShell prompt: PS followed by path and >
-                    if (trimmedEnd.matches("(?s).*PS [A-Za-z]:\\\\[^>]*>\\s*$")) {
-                        promptFound.set(true);
-                        completionLatch.countDown();
-                    }
-                } else {
-                    // Unix prompt: ends with $ or # 
-                    if (trimmedEnd.matches("(?s).*[$#]\\s*$")) {
-                        promptFound.set(true);
-                        completionLatch.countDown();
-                    }
+                if (parser.isPromptAtEnd(trimmedEnd)) {
+                    promptFound.set(true);
+                    completionLatch.countDown();
                 }
             }
         };
@@ -153,7 +144,7 @@ public class TerminalSyncExecutor {
         
         try {
             // Send just the command (no marker)
-            String fullCommand = buildCommandWithMarker(command, marker);
+            String fullCommand = buildCommandWithMarker(parser, command, marker);
             log.info("Executing synchronized command in session {}: {}", sessionId, command);
             
             // Write command to terminal (this makes it visible to user)
@@ -167,7 +158,7 @@ public class TerminalSyncExecutor {
             
             // Process output
             String raw = rawOutput.toString();
-            String clean = cleanOutput(raw, command, marker);
+            String clean = cleanOutput(parser, raw, command, marker);
             boolean success = completed && (markerFound.get() ? exitCode.get() == 0 : promptFound.get());
             
             log.info("Command completed in {}ms, success={}, outputLen={}", 
@@ -247,17 +238,8 @@ public class TerminalSyncExecutor {
      * Build command string - just the command with newline, no marker appended.
      * We detect completion by watching for the shell prompt to reappear.
      */
-    private String buildCommandWithMarker(String command, String marker) {
-        if (marker == null || marker.isBlank()) {
-            return systemInspector.isWindows() ? command + "\r" : command + "\n";
-        }
-        if (systemInspector.isWindows()) {
-            return command + "\r" +
-                    "$nexusExit = if ($?) { 0 } elseif ($LASTEXITCODE -ne $null) { $LASTEXITCODE } else { 1 }; " +
-                    "Write-Output \"" + marker + ":$nexusExit\"\r";
-        } else {
-            return command + "\nprintf '\\n" + marker + ":%s\\n' \"$?\"\n";
-        }
+    private String buildCommandWithMarker(TerminalSyncParser parser, String command, String marker) {
+        return parser.buildCommandWithMarker(command, marker);
     }
     
     /**
@@ -315,7 +297,7 @@ public class TerminalSyncExecutor {
      * Clean output for LLM consumption.
      * Removes ANSI codes, prompts, and the command echo.
      */
-    private String cleanOutput(String raw, String command, String marker) {
+    private String cleanOutput(TerminalSyncParser parser, String raw, String command, String marker) {
         if (raw == null || raw.isEmpty()) {
             return "(no output)";
         }
@@ -348,8 +330,7 @@ public class TerminalSyncExecutor {
                 continue;
             }
             
-            // Skip PowerShell prompts
-            if (PS_PROMPT_PATTERN.matcher(trimmed).find()) {
+            if (parser.shouldStripPromptLine(trimmed)) {
                 passedCommand = true;
                 continue;
             }

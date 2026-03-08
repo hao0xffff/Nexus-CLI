@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import Terminal from './components/Terminal'
 import AISidebar from './components/AISidebar'
 import TitleBar from './components/TitleBar'

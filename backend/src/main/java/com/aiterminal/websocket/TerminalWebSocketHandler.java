@@ -68,7 +68,9 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
     protected void handleBinaryMessage(WebSocketSession session, BinaryMessage message) throws Exception {
         ITerminalSession terminal = wsToTerminal.get(session.getId());
         if (terminal != null && terminal.isActive()) {
-            byte[] data = message.getPayload().array();
+            ByteBuffer payload = message.getPayload();
+            byte[] data = new byte[payload.remaining()];
+            payload.get(data);
             terminal.write(data);
         }
     }

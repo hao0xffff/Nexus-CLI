@@ -6,7 +6,7 @@ import * as http from 'http';
 
 let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcess | null = null;
-let backendPort = 8080;
+const backendPort = 8080;
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 

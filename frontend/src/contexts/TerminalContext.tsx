@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef, ReactNode } from 'react'
+import { isNoiseTerminalLine, normalizeTerminalLine } from '../utils/terminalOutput'
 
 interface SSHConfig {
   host: string
@@ -53,6 +54,8 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
   const websocketsRef = useRef<Map<string, WebSocket>>(new Map())
   const outputBuffersRef = useRef<Map<string, string[]>>(new Map())
   const terminalWritersRef = useRef<Map<string, (data: Uint8Array) => void>>(new Map())
+  const decodersRef = useRef<Map<string, TextDecoder>>(new Map())
+  const decoderCarryRef = useRef<Map<string, string>>(new Map())
 
   // Get WebSocket URL from Electron
   const getWsUrl = useCallback(async () => {
@@ -77,6 +80,8 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
     setSessions(prev => [...prev, session])
     setActiveSessionId(sessionId)
     outputBuffersRef.current.set(sessionId, [])
+    decodersRef.current.set(sessionId, new TextDecoder('utf-8'))
+    decoderCarryRef.current.set(sessionId, '')
 
     // Create WebSocket connection
     const ws = new WebSocket(wsUrl)
@@ -101,9 +106,22 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
         const data = new Uint8Array(event.data)
         
         // Update output buffer for AI context
-        const text = new TextDecoder().decode(data)
+        const decoder = decodersRef.current.get(sessionId) || new TextDecoder('utf-8')
+        decodersRef.current.set(sessionId, decoder)
+        const text = decoder.decode(data, { stream: true })
+        const previousCarry = decoderCarryRef.current.get(sessionId) || ''
+        const merged = previousCarry + text
+        const parts = merged.split(/\r?\n/)
+        const nextCarry = parts.pop() || ''
+        decoderCarryRef.current.set(sessionId, nextCarry)
         const lines = outputBuffersRef.current.get(sessionId) || []
-        lines.push(...text.split('\n').filter(l => l.length > 0))
+        for (const item of parts) {
+          const normalized = normalizeTerminalLine(item)
+          if (isNoiseTerminalLine(normalized)) {
+            continue
+          }
+          lines.push(normalized)
+        }
         while (lines.length > 100) lines.shift()
         outputBuffersRef.current.set(sessionId, lines)
 
@@ -119,7 +137,7 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
           console.log(`Control message for ${sessionId}:`, message)
 
           switch (message.type) {
-            case 'ready':
+            case 'ready': {
               // Store the backend session ID for ReAct and other backend operations
               const backendId = message.sessionId
               console.log(`Backend session ID for ${sessionId}: ${backendId}`)
@@ -127,6 +145,7 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
                 s.id === sessionId ? { ...s, status: 'connected', backendSessionId: backendId } : s
               ))
               break
+            }
             case 'closed':
               setSessions(prev => prev.map(s =>
                 s.id === sessionId ? { ...s, status: 'disconnected' } : s
@@ -158,6 +177,8 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
         s.id === sessionId ? { ...s, status: 'disconnected' } : s
       ))
       websocketsRef.current.delete(sessionId)
+      decodersRef.current.delete(sessionId)
+      decoderCarryRef.current.delete(sessionId)
     }
   }, [getWsUrl])
 
@@ -171,7 +192,9 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
 
     // Clean up all refs for this session
     outputBuffersRef.current.delete(id)
-    terminalWritersRef.current.delete(id) // Fix: also remove terminal writer to prevent memory leak
+    terminalWritersRef.current.delete(id)
+    decodersRef.current.delete(id)
+    decoderCarryRef.current.delete(id)
     
     setSessions(prev => {
       const remaining = prev.filter(s => s.id !== id)
@@ -209,7 +232,14 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
   }, [])
 
   const getRecentOutput = useCallback((sessionId: string, lines = 50) => {
-    const buffer = outputBuffersRef.current.get(sessionId) || []
+    const buffer = [...(outputBuffersRef.current.get(sessionId) || [])]
+    const carry = decoderCarryRef.current.get(sessionId) || ''
+    if (carry.trim()) {
+      const normalizedCarry = normalizeTerminalLine(carry)
+      if (!isNoiseTerminalLine(normalizedCarry)) {
+        buffer.push(normalizedCarry)
+      }
+    }
     return buffer.slice(-lines).join('\n')
   }, [])
 
@@ -219,11 +249,18 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
 
   // Cleanup on unmount
   useEffect(() => {
+    const websockets = websocketsRef.current
+    const outputBuffers = outputBuffersRef.current
+    const terminalWriters = terminalWritersRef.current
+    const decoders = decodersRef.current
+    const decoderCarry = decoderCarryRef.current
     return () => {
-      websocketsRef.current.forEach(ws => ws.close())
-      websocketsRef.current.clear()
-      outputBuffersRef.current.clear()
-      terminalWritersRef.current.clear() // Clean up all terminal writers
+      websockets.forEach(ws => ws.close())
+      websockets.clear()
+      outputBuffers.clear()
+      terminalWriters.clear()
+      decoders.clear()
+      decoderCarry.clear()
     }
   }, [])
 

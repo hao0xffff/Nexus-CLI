@@ -91,13 +91,7 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
 
       let buffer = ''
 
-      while (true) {
-        // Check if aborted
-        if (abortController.signal.aborted) {
-          reader.cancel()
-          break
-        }
-
+      while (!abortController.signal.aborted) {
         const { done, value } = await reader.read()
         
         if (done) {
@@ -141,6 +135,10 @@ export default function ReActPanel({ onClose }: ReActPanelProps) {
             }
           }
         }
+      }
+
+      if (abortController.signal.aborted) {
+        reader.cancel()
       }
     } catch (error) {
       // Ignore abort errors

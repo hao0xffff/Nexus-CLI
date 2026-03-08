@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Trash2, Bot, User, AlertTriangle, Play, Loader2, Zap, HelpCircle, Terminal, FileCode, Bug, Settings2, Settings, Wand2 } from 'lucide-react'
+import { Send, Trash2, Bot, User, Loader2, Terminal, FileCode, Bug, Settings2, Settings, Wand2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAI } from '../contexts/AIContext'
@@ -18,7 +18,6 @@ const QUICK_ACTIONS = [
 export default function AISidebar() {
   const { messages, isLoading, provider, providerInfo, sendMessage, clearHistory, refreshProvider } = useAI()
   const [input, setInput] = useState('')
-  const [showQuickActions, setShowQuickActions] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
   const [showReActPanel, setShowReActPanel] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -147,7 +146,6 @@ export default function AISidebar() {
                     key={index}
                     onClick={() => {
                       sendMessage(action.prompt)
-                      setShowQuickActions(false)
                     }}
                     disabled={isLoading}
                     className="flex items-center gap-2 px-3 py-2 bg-[#24283b] hover:bg-[#292e42] rounded-lg text-xs text-terminal-fg/70 hover:text-terminal-fg transition-colors disabled:opacity-50"

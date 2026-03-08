@@ -23,10 +23,8 @@ export default function Terminal({ sessionId }: TerminalProps) {
   const fitAddonRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
   const initializedRef = useRef(false)
-  const { getSession, sendInput, sendResize, registerTerminal } = useTerminal()
+  const { sendInput, sendResize, registerTerminal } = useTerminal()
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({ visible: false, x: 0, y: 0 })
-
-  const session = getSession(sessionId)
 
   // Initialize terminal
   useEffect(() => {

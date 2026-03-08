@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { 
   X, Settings, Server, Key, CheckCircle2, XCircle, RefreshCw, 
-  Loader2, Globe, Cpu, Zap, Cloud, AlertCircle, Eye, EyeOff,
-  ChevronRight, Sparkles
+  Loader2, Globe, Cpu, Zap, AlertCircle, Eye, EyeOff, Sparkles
 } from 'lucide-react'
 
 // Provider preset configurations
@@ -158,14 +157,24 @@ export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSett
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const [testingConnection, setTestingConnection] = useState(false)
 
-  // Load config
-  useEffect(() => {
-    if (isOpen) {
-      loadConfig()
+  const loadOllamaModels = useCallback(async () => {
+    try {
+      setLoadingModels(true)
+      const apiBase = await getApiBase()
+      const res = await fetch(`${apiBase}/ollama/models`)
+      const data = await res.json()
+      setOllamaModels(data.models || [])
+      if (data.currentModel && !ollamaModel) {
+        setOllamaModel(data.currentModel)
+      }
+    } catch (err) {
+      console.error('Failed to load Ollama models:', err)
+    } finally {
+      setLoadingModels(false)
     }
-  }, [isOpen])
+  }, [ollamaModel])
 
-  const loadConfig = async () => {
+  const loadConfig = useCallback(async () => {
     try {
       setLoading(true)
       const apiBase = await getApiBase()
@@ -209,30 +218,20 @@ export default function LLMSettings({ isOpen, onClose, onConfigChange }: LLMSett
       }
       
       // Load Ollama models
-      loadOllamaModels()
+      await loadOllamaModels()
     } catch (err) {
       console.error('Failed to load config:', err)
     } finally {
       setLoading(false)
     }
-  }
+  }, [loadOllamaModels])
 
-  const loadOllamaModels = async () => {
-    try {
-      setLoadingModels(true)
-      const apiBase = await getApiBase()
-      const res = await fetch(`${apiBase}/ollama/models`)
-      const data = await res.json()
-      setOllamaModels(data.models || [])
-      if (data.currentModel && !ollamaModel) {
-        setOllamaModel(data.currentModel)
-      }
-    } catch (err) {
-      console.error('Failed to load Ollama models:', err)
-    } finally {
-      setLoadingModels(false)
+  // Load config
+  useEffect(() => {
+    if (isOpen) {
+      loadConfig()
     }
-  }
+  }, [isOpen, loadConfig])
 
   const handlePresetSelect = (presetId: ProviderId) => {
     setSelectedPreset(presetId)
